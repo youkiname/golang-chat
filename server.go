@@ -27,7 +27,6 @@ func main() {
 
 	server.On(gosocketio.OnConnection, func(c *gosocketio.Channel) {
 		log.Println("Connected " + c.Id())
-		c.Join("main")
 	})
 	server.On(gosocketio.OnDisconnection, func(c *gosocketio.Channel) {
 		log.Println("Disconnected " + c.Id())
@@ -37,6 +36,8 @@ func main() {
 		time.Sleep(1 * time.Second)
 		user, err := getUser(data.Username, data.PasswordHash)
 		if err == nil {
+			log.Println("New login " + user.Username)
+			c.Join("main")
 			c.Emit("/login", user)
 		}
 	})
