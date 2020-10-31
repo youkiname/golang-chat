@@ -1,1 +1,1 @@
-go build -o gui.exe models.go utils.go gui.go && .\gui.exe
+go build -o gui.exe models.go utils.go db.go gui.go && .\gui.exe

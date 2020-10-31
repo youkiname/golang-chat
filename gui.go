@@ -2,7 +2,9 @@
 package main
 
 import (
+	"errors"
 	"log"
+	"time"
 
 	"fyne.io/fyne"
 	"fyne.io/fyne/app"
@@ -13,108 +15,207 @@ import (
 	"github.com/graarh/golang-socketio/transport"
 )
 
-const WIDTH int = 640
-const HEIGHT int = 480
+const WIDTH int = 1280
+const HEIGHT int = 720
 
-var currentUser User
-var loggedIn = false
-var client *gosocketio.Client
+const HOST string = "localhost"
+const PORT int = 3811
 
-func connect() *gosocketio.Client {
+type ChatApplication struct {
+	App           fyne.App
+	Window        fyne.Window
+	LeftSideBar   *widget.Group
+	MessagesList  *widget.Box
+	Client        *gosocketio.Client
+	Connected     bool
+	CurrentUser   User
+	LoggedIn      bool
+	CurrentChatId int64
+}
 
-	host := "localhost"
-	port := 3811
+func (chatApp *ChatApplication) init() {
+	chatApp.App = app.New()
+	window := chatApp.App.NewWindow("Super chat")
+	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
 
+	window.SetContent(buildMainWindow(chatApp))
+	window.SetMaster()
+
+	chatApp.Window = window
+	chatApp.CurrentChatId = 0 // main channel
+	chatApp.Connected = false
+	chatApp.LoggedIn = false
+}
+
+func (chatApp *ChatApplication) showWindow() {
+	chatApp.Window.ShowAndRun()
+}
+
+func (chatApp *ChatApplication) connect() bool {
+	time.Sleep(1 * time.Second)
 	client, err := gosocketio.Dial(
-		gosocketio.GetUrl(host, port, false),
+		gosocketio.GetUrl(HOST, PORT, false),
 		transport.GetDefaultWebsocketTransport())
 
 	if err != nil {
-		log.Fatal(err)
+		chatApp.showError(err)
+		return false
 	}
 
 	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
-		log.Fatal("Disconnected")
+		chatApp.showError(errors.New("Disconnected!"))
 	})
 	if err != nil {
-		log.Fatal(err)
+		chatApp.showError(err)
+		return false
 	}
 
 	err = client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
 		log.Println("Connected")
 	})
 	if err != nil {
-		log.Fatal(err)
+		chatApp.showError(err)
+		return false
 	}
 
-	return client
+	chatApp.Client = client
+
+	chatApp.Connected = true
+	chatApp.Window.SetOnClosed(func() {
+		chatApp.Client.Close()
+	})
+
+	chatApp.initClientCallbacks()
+	return true
 }
 
-func sendLoginData(client *gosocketio.Client, username string, password string) {
-	client.Emit("/login", LoginData{username, GetMD5Hash(password)})
+func (chatApp *ChatApplication) initClientCallbacks() {
+	client := chatApp.Client
+	client.On("/failed-login", func(h *gosocketio.Channel, errorData LoginError) {
+		log.Println(errorData.Description)
+		chatApp.showLoginDialog(errorData.Description)
+		chatApp.LoggedIn = false
+	})
+	client.On("/failed-registeration", func(h *gosocketio.Channel, errorData RegistrationError) {
+		log.Println(errorData.Description)
+		chatApp.showRegisterDialog(errorData.Description)
+		chatApp.LoggedIn = false
+	})
+
+	client.On("/login", func(h *gosocketio.Channel, user User) {
+		log.Println("LOGIN")
+		chatApp.CurrentUser = user
+		chatApp.LoggedIn = true
+		chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + user.Username))
+	})
+
+	client.On("/message", func(h *gosocketio.Channel, msg SavedMessage) {
+		chatApp.addMessageToList(msg)
+	})
 }
 
-func sendMessage(client *gosocketio.Client, user User, text string) {
-	client.Emit("/message", Message{user, text})
+func (chatApp *ChatApplication) sendLoginData(username string, password string) {
+	if chatApp.Connected {
+		chatApp.Client.Emit("/login", LoginData{username, GetMD5Hash(password)})
+	} else {
+		chatApp.showError(errors.New("You are not connected to the server."))
+	}
 }
 
-func addMessageToList(list *widget.Box, msg Message) {
-	messageLabel := widget.NewLabel(msg.User.Username + ": " + msg.Text)
-	list.Append(messageLabel)
+func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
+	if chatApp.Connected {
+		chatApp.Client.Emit("/register", LoginData{username, GetMD5Hash(password)})
+	} else {
+		chatApp.showError(errors.New("You are not connected to the server."))
+	}
 }
 
-func showSystemMessage(list *widget.Box, text string) {
-	label := widget.NewLabelWithStyle(
-		text,
-		fyne.TextAlignCenter,
-		fyne.TextStyle{true, false, true})
-	list.Append(label)
+func (chatApp *ChatApplication) sendMessage(user User, text string) {
+	if chatApp.Connected && chatApp.LoggedIn {
+		chatApp.Client.Emit("/message", Message{user, chatApp.CurrentChatId, text})
+	} else if !chatApp.LoggedIn {
+		chatApp.showError(errors.New("You are not logged in."))
+	} else {
+		chatApp.showError(errors.New("You are not connected to the server."))
+	}
 }
 
-func showError(list *widget.Box, errorText string) {
-	showSystemMessage(list, "ERROR: "+errorText)
+func (chatApp *ChatApplication) addMessageToList(msg SavedMessage) {
+	messageLabel := widget.NewLabel(msg.UserData.Username + ": " + msg.Text)
+	chatApp.MessagesList.Append(messageLabel)
+}
+
+func (chatApp *ChatApplication) showError(err error) {
+	log.Println(err)
+	dialog.ShowError(err, chatApp.Window)
 }
 
 // -------- BUILD WINDOW----------
 
-func showLoginDialog(window fyne.Window) {
+func (chatApp *ChatApplication) showLoginDialog(title string) {
 	inputUsername := widget.NewEntry()
 	inputPassword := widget.NewPasswordEntry()
 
 	loginBox := widget.NewVBox(inputUsername, inputPassword)
 	loginBox.Resize(fyne.NewSize(400, 400))
 
-	dialog.ShowCustomConfirm("Login", "Ok", "cancel", loginBox,
+	dialog.ShowCustomConfirm(title, "Ok", "Cancel", loginBox,
 		func(result bool) {
 			if result {
-				sendLoginData(client, inputUsername.Text, inputPassword.Text)
+				chatApp.sendLoginData(inputUsername.Text, inputPassword.Text)
 			}
-		}, window)
+		}, chatApp.Window)
 }
 
-func buildCenter() fyne.Widget {
+func (chatApp *ChatApplication) showRegisterDialog(title string) {
+	inputUsername := widget.NewEntry()
+	inputPassword := widget.NewPasswordEntry()
+
+	loginBox := widget.NewVBox(inputUsername, inputPassword)
+	loginBox.Resize(fyne.NewSize(400, 400))
+
+	dialog.ShowCustomConfirm(title, "Ok", "Cancel", loginBox,
+		func(result bool) {
+			if result {
+				chatApp.sendRegisterData(inputUsername.Text, inputPassword.Text)
+			}
+		}, chatApp.Window)
+}
+
+func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
+	login := widget.NewButton("Login", func() {
+		if chatApp.Connected {
+			chatApp.showLoginDialog("Login")
+		} else {
+			chatApp.showError(errors.New("You are not connected to the server."))
+		}
+	})
+	register := widget.NewButton("Register", func() {
+		if chatApp.Connected {
+			chatApp.showRegisterDialog("Register")
+		} else {
+			chatApp.showError(errors.New("You are not connected to the server."))
+		}
+	})
+
+	group := widget.NewGroup("Profile", login, register)
+	group.Resize(fyne.NewSize(400, HEIGHT))
+	return group
+}
+
+func buildCenter(chatApp *ChatApplication) fyne.Widget {
 	messagesList := widget.NewVBox()
 	input := widget.NewEntry()
 	input.SetPlaceHolder("Your message")
 	send := widget.NewButton("Send", func() {
 		if input.Text != "" {
-			go sendMessage(client, currentUser, input.Text)
+			chatApp.sendMessage(chatApp.CurrentUser, input.Text)
 			input.SetText("")
 		}
 	})
-	systemMessagesList := widget.NewVBox()
+	chatApp.MessagesList = messagesList
 
-	client.On("/login", func(h *gosocketio.Channel, user User) {
-		log.Println("LOGIN")
-		currentUser = user
-		loggedIn = true
-	})
-
-	client.On("/message", func(h *gosocketio.Channel, msg Message) {
-		addMessageToList(messagesList, msg)
-	})
-
-	return widget.NewVBox(messagesList, input, send, systemMessagesList)
+	return widget.NewGroup("Messenger", messagesList, input, send)
 }
 
 func buildRightSidebar() fyne.Widget {
@@ -122,37 +223,32 @@ func buildRightSidebar() fyne.Widget {
 		widget.NewLabel("Channel 1"),
 		widget.NewLabel("Channel 2"),
 	}
-	box := widget.NewVBox()
-	box.Resize(fyne.NewSize(100, 470))
+	group := widget.NewGroup("Chats")
+	group.Resize(fyne.NewSize(100, HEIGHT))
 
 	for i := 0; i < len(channels); i++ {
-		box.Append(channels[i])
+		group.Append(channels[i])
 	}
-	return box
+	return group
 }
 
-func buildMainWindow(app fyne.App, window fyne.Window) fyne.Widget {
-	return widget.NewHBox(buildCenter(), buildRightSidebar())
+func buildMainWindow(chatApp *ChatApplication) fyne.Widget {
+	leftSideBar := buildLeftSidebar(chatApp)
+	chatApp.LeftSideBar = leftSideBar
+	return widget.NewHBox(leftSideBar,
+		buildCenter(chatApp),
+		buildRightSidebar()))
 }
 
 // ------------------
 
 func main() {
-	app := app.New()
+	chatApp := ChatApplication{}
+	chatApp.init()
+	go chatApp.connect()
+	chatApp.showWindow()
+	//showRegisterDialog(window, "Registration")
+	//showLoginDialog(window, "Login")
+	//client.Emit("/login", LoginData{"vadim", "202cb962ac59075b964b07152d234b70"})
 
-	client = connect()
-
-	window := app.NewWindow("Super chat")
-	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
-
-	window.SetContent(buildMainWindow(app, window))
-	window.SetMaster()
-	window.SetOnClosed(func() {
-		client.Close()
-	})
-
-	// showLoginDialog(window)
-	client.Emit("/login", LoginData{"vadim", "202cb962ac59075b964b07152d234b70"})
-
-	window.ShowAndRun()
 }

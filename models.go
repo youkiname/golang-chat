@@ -2,17 +2,62 @@
 package main
 
 type User struct {
-	Id           int
-	Username     string
-	PasswordHash string
+	Id           int64  `json: "id"`
+	Username     string `json: "username"`
+	PasswordHash string `json: "password_hash"`
+}
+
+type UserPublicInfo struct {
+	Id       int64  `json: "id"`
+	Username string `json: "username"`
+}
+
+func (user *User) getPublicInfo() UserPublicInfo {
+	return UserPublicInfo{user.Id, user.Username}
+}
+
+type SavedMessage struct {
+	Id        int64          `json: "id"`
+	UserData  UserPublicInfo `json:"user_data"`
+	ChatId    int64          `json:"chat_id"`
+	Text      string         `json:"text"`
+	CreatedOn int64          `json:"created_on"`
+}
+
+func (msg *SavedMessage) getChatType() string {
+	if msg.ChatId == 0 {
+		return "group"
+	}
+	return "private"
 }
 
 type Message struct {
-	User User   `json:"user"`
-	Text string `json:"text"`
+	User   User   `json:"user"`
+	ChatId int64  `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
+func (msg *Message) getChatType() string {
+	if msg.ChatId == 0 {
+		return "group"
+	}
+	return "private"
 }
 
 type LoginData struct {
-	Username     string
-	PasswordHash string
+	Username     string `json: "username"`
+	PasswordHash string `json: "password_hash"`
+}
+
+type ChatAdmins struct {
+	ChatId  int64 `json: "chat_id"`
+	AdminId int64 `json: "admin_id"`
+}
+
+type RegistrationError struct {
+	Description string `json: "description"`
+}
+
+type LoginError struct {
+	Description string `json: "description"`
 }
