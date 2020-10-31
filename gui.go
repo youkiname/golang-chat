@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne"
 	"fyne.io/fyne/app"
 	"fyne.io/fyne/dialog"
+	"fyne.io/fyne/layout"
 	"fyne.io/fyne/widget"
 
 	"github.com/graarh/golang-socketio"
@@ -25,12 +26,13 @@ type ChatApplication struct {
 	App           fyne.App
 	Window        fyne.Window
 	LeftSideBar   *widget.Group
-	MessagesList  *widget.Box
+	MessagesList  *widget.TextGrid
 	Client        *gosocketio.Client
 	Connected     bool
 	CurrentUser   User
 	LoggedIn      bool
 	CurrentChatId int64
+	// messagesStorage map[int][]SavedMessage
 }
 
 func (chatApp *ChatApplication) init() {
@@ -86,6 +88,7 @@ func (chatApp *ChatApplication) connect() bool {
 	})
 
 	chatApp.initClientCallbacks()
+	client.Emit("/login", LoginData{"vadim", "65ded5353c5ee48d0b7d48c591b8f430"})
 	return true
 }
 
@@ -110,7 +113,17 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 	})
 
 	client.On("/message", func(h *gosocketio.Channel, msg SavedMessage) {
-		chatApp.addMessageToList(msg)
+		if chatApp.CurrentChatId == msg.ChatId {
+			chatApp.addMessageToList(msg)
+		}
+	})
+
+	client.On("/get-messages", func(h *gosocketio.Channel, messages []SavedMessage) {
+		log.Println("Load messages")
+		chatApp.clearMessagesList()
+		for _, msg := range messages {
+			chatApp.addMessageToList(msg)
+		}
 	})
 }
 
@@ -141,13 +154,25 @@ func (chatApp *ChatApplication) sendMessage(user User, text string) {
 }
 
 func (chatApp *ChatApplication) addMessageToList(msg SavedMessage) {
-	messageLabel := widget.NewLabel(msg.UserData.Username + ": " + msg.Text)
-	chatApp.MessagesList.Append(messageLabel)
+	newMessageString := msg.UserData.Username + ": " + msg.Text
+	chatApp.MessagesList.SetText(chatApp.MessagesList.Text() + "\n" + newMessageString)
+}
+
+func (chatApp *ChatApplication) clearMessagesList() {
+	chatApp.MessagesList.SetText("")
 }
 
 func (chatApp *ChatApplication) showError(err error) {
 	log.Println(err)
 	dialog.ShowError(err, chatApp.Window)
+}
+
+func (chatApp *ChatApplication) loadMessages(chatId int64) {
+	if !chatApp.Connected || !chatApp.LoggedIn {
+		return
+	}
+	client := chatApp.Client
+	client.Emit("/get-messages", MessagesRequest{chatId, chatApp.CurrentUser})
 }
 
 // -------- BUILD WINDOW----------
@@ -204,7 +229,9 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 }
 
 func buildCenter(chatApp *ChatApplication) fyne.Widget {
-	messagesList := widget.NewVBox()
+	messagesList := widget.NewTextGridFromString("")
+	chatApp.MessagesList = messagesList
+
 	input := widget.NewEntry()
 	input.SetPlaceHolder("Your message")
 	send := widget.NewButton("Send", func() {
@@ -213,9 +240,13 @@ func buildCenter(chatApp *ChatApplication) fyne.Widget {
 			input.SetText("")
 		}
 	})
-	chatApp.MessagesList = messagesList
+	refresh := widget.NewButton("Refresh", func() {
+		chatApp.loadMessages(chatApp.CurrentChatId)
+	})
 
-	return widget.NewGroup("Messenger", messagesList, input, send)
+	return widget.NewGroup("Messenger",
+		widget.NewScrollContainer(messagesList),
+		input, send, refresh)
 }
 
 func buildRightSidebar() fyne.Widget {
@@ -232,12 +263,18 @@ func buildRightSidebar() fyne.Widget {
 	return group
 }
 
-func buildMainWindow(chatApp *ChatApplication) fyne.Widget {
+func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 	leftSideBar := buildLeftSidebar(chatApp)
 	chatApp.LeftSideBar = leftSideBar
-	return widget.NewHBox(leftSideBar,
-		buildCenter(chatApp),
-		buildRightSidebar()))
+
+	center := buildCenter(chatApp)
+	center.Resize(fyne.NewSize(500, HEIGHT))
+
+	rightSideBar := buildRightSidebar()
+	return fyne.NewContainerWithLayout(
+		layout.NewBorderLayout(nil, nil, leftSideBar, rightSideBar),
+		leftSideBar,
+		center, rightSideBar)
 }
 
 // ------------------
@@ -247,8 +284,4 @@ func main() {
 	chatApp.init()
 	go chatApp.connect()
 	chatApp.showWindow()
-	//showRegisterDialog(window, "Registration")
-	//showLoginDialog(window, "Login")
-	//client.Emit("/login", LoginData{"vadim", "202cb962ac59075b964b07152d234b70"})
-
 }

@@ -55,12 +55,12 @@ func main() {
 			c.BroadcastTo("main", "/message", savedMessage)
 		}
 	})
-	server.On("/last-messages", func(c *gosocketio.Channel, chatId int64, user User) {
+	server.On("/get-messages", func(c *gosocketio.Channel, requestData MessagesRequest) {
+		user := requestData.User
+		chatId := requestData.ChatId
 		messages := db.getMessagesFromChat(user.Id, chatId)
-		for _, msg := range messages {
-			log.Println(msg.UserData.Username + ": " + msg.Text)
-		}
-		c.Emit("/last-messages", messages)
+
+		c.Emit("/get-messages", messages)
 	})
 
 	serveMux := http.NewServeMux()

@@ -44,6 +44,11 @@ func (msg *Message) getChatType() string {
 	return "private"
 }
 
+type MessagesRequest struct {
+	ChatId int64 `json:"chat_id"`
+	User   User  `json:"user"`
+}
+
 type LoginData struct {
 	Username     string `json: "username"`
 	PasswordHash string `json: "password_hash"`
