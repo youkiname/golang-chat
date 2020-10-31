@@ -26,7 +26,7 @@ type ChatApplication struct {
 	App           fyne.App
 	Window        fyne.Window
 	LeftSideBar   *widget.Group
-	MessagesList  *widget.TextGrid
+	MessagesList  *MessageList
 	Client        *gosocketio.Client
 	Connected     bool
 	CurrentUser   User
@@ -121,9 +121,8 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 	client.On("/get-messages", func(h *gosocketio.Channel, messages []SavedMessage) {
 		log.Println("Load messages")
 		chatApp.clearMessagesList()
-		for _, msg := range messages {
-			chatApp.addMessageToList(msg)
-		}
+		chatApp.MessagesList.setMessages(messages)
+		chatApp.MessagesList.refresh()
 	})
 }
 
@@ -154,12 +153,14 @@ func (chatApp *ChatApplication) sendMessage(user User, text string) {
 }
 
 func (chatApp *ChatApplication) addMessageToList(msg SavedMessage) {
-	newMessageString := msg.UserData.Username + ": " + msg.Text
-	chatApp.MessagesList.SetText(chatApp.MessagesList.Text() + "\n" + newMessageString)
+	chatApp.MessagesList.addMessage(msg)
+	chatApp.MessagesList.refresh()
+
 }
 
 func (chatApp *ChatApplication) clearMessagesList() {
-	chatApp.MessagesList.SetText("")
+	chatApp.MessagesList.clear()
+	chatApp.MessagesList.refresh()
 }
 
 func (chatApp *ChatApplication) showError(err error) {
@@ -228,12 +229,15 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 	return group
 }
 
-func buildCenter(chatApp *ChatApplication) fyne.Widget {
-	messagesList := widget.NewTextGridFromString("")
+func buildCenter(chatApp *ChatApplication) *fyne.Container {
+	messagesList := newMessageList()
 	chatApp.MessagesList = messagesList
+	scroller := widget.NewScrollContainer(messagesList.getContainer())
+	scroller.SetMinSize(fyne.NewSize(500, 500))
 
 	input := widget.NewEntry()
 	input.SetPlaceHolder("Your message")
+
 	send := widget.NewButton("Send", func() {
 		if input.Text != "" {
 			chatApp.sendMessage(chatApp.CurrentUser, input.Text)
@@ -244,9 +248,12 @@ func buildCenter(chatApp *ChatApplication) fyne.Widget {
 		chatApp.loadMessages(chatApp.CurrentChatId)
 	})
 
-	return widget.NewGroup("Messenger",
-		widget.NewScrollContainer(messagesList),
-		input, send, refresh)
+	top := widget.NewGroup("Messenger", scroller)
+	bottom := widget.NewHBox(input, send, refresh)
+
+	layout := layout.NewBorderLayout(top, bottom, nil, nil)
+
+	return fyne.NewContainerWithLayout(layout, top, bottom)
 }
 
 func buildRightSidebar() fyne.Widget {
@@ -268,7 +275,6 @@ func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 	chatApp.LeftSideBar = leftSideBar
 
 	center := buildCenter(chatApp)
-	center.Resize(fyne.NewSize(500, HEIGHT))
 
 	rightSideBar := buildRightSidebar()
 	return fyne.NewContainerWithLayout(
