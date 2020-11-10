@@ -16,6 +16,11 @@ func (user *User) getPublicInfo() UserPublicInfo {
 	return UserPublicInfo{user.Id, user.Username}
 }
 
+type Channel struct {
+	Id    int64  `json: "id"`
+	Title string `json: "title"`
+}
+
 type SavedMessage struct {
 	Id        int64          `json: "id"`
 	UserData  UserPublicInfo `json:"user_data"`
@@ -47,6 +52,10 @@ func (msg *Message) getChatType() string {
 type MessagesRequest struct {
 	ChatId int64 `json:"chat_id"`
 	User   User  `json:"user"`
+}
+
+type ChannelsRequest struct {
+	User User `json:"user"`
 }
 
 type LoginData struct {

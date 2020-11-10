@@ -3,6 +3,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -22,16 +23,25 @@ const HEIGHT int = 720
 const HOST string = "localhost"
 const PORT int = 3811
 
+const GROUP_CHANNEL_TITLE = "MAIN"
+const groupChatId int64 = 0
+
+const NOTES_CHANNEL_TITLE = "NOTES"
+
 type ChatApplication struct {
-	App           fyne.App
-	Window        fyne.Window
-	LeftSideBar   *widget.Group
-	MessagesList  *MessageList
-	Client        *gosocketio.Client
-	Connected     bool
-	CurrentUser   User
-	LoggedIn      bool
-	CurrentChatId int64
+	App                 fyne.App
+	Window              fyne.Window
+	LeftSideBar         *widget.Group
+	MessagesList        *MessageList
+	MessageListScroller *widget.ScrollContainer
+	Client              *gosocketio.Client
+	Connected           bool
+	CurrentUser         User
+	LoggedIn            bool
+	CurrentChatId       int64
+	ProfileInfo         *widget.Label
+	Channels            []Channel
+	ChannelsRadioGroup  *widget.RadioGroup
 	// messagesStorage map[int][]SavedMessage
 }
 
@@ -59,7 +69,7 @@ func (chatApp *ChatApplication) connect() bool {
 		gosocketio.GetUrl(HOST, PORT, false),
 		transport.GetDefaultWebsocketTransport())
 
-	if err != nil {
+	if isError(err) {
 		chatApp.showError(err)
 		return false
 	}
@@ -67,7 +77,7 @@ func (chatApp *ChatApplication) connect() bool {
 	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
 		chatApp.showError(errors.New("Disconnected!"))
 	})
-	if err != nil {
+	if isError(err) {
 		chatApp.showError(err)
 		return false
 	}
@@ -75,7 +85,7 @@ func (chatApp *ChatApplication) connect() bool {
 	err = client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
 		log.Println("Connected")
 	})
-	if err != nil {
+	if isError(err) {
 		chatApp.showError(err)
 		return false
 	}
@@ -98,31 +108,68 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		log.Println(errorData.Description)
 		chatApp.showLoginDialog(errorData.Description)
 		chatApp.LoggedIn = false
+		chatApp.ProfileInfo.SetText("FAILED LOGIN")
 	})
 	client.On("/failed-registeration", func(h *gosocketio.Channel, errorData RegistrationError) {
 		log.Println(errorData.Description)
 		chatApp.showRegisterDialog(errorData.Description)
 		chatApp.LoggedIn = false
+		chatApp.ProfileInfo.SetText("FAILED LOGIN")
 	})
 
 	client.On("/login", func(h *gosocketio.Channel, user User) {
 		log.Println("LOGIN")
 		chatApp.CurrentUser = user
 		chatApp.LoggedIn = true
+		chatApp.ProfileInfo.SetText("WELCOME, " + user.Username)
 		chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + user.Username))
+
+		chatApp.CurrentChatId = groupChatId
+
+		chatApp.clearMessagesList()
+		chatApp.loadChannels()
+		// have not to load messages. Main channel will be loaded after
+		// auto selecting this channel in the right sidebar
 	})
 
 	client.On("/message", func(h *gosocketio.Channel, msg SavedMessage) {
-		if chatApp.CurrentChatId == msg.ChatId {
+		currentChatId := chatApp.CurrentChatId
+		currentUserId := chatApp.CurrentUser.Id
+		chatType := msg.getChatType()
+		isMessageFromMe := msg.UserData.Id == chatApp.CurrentUser.Id
+		isMessageToMe := msg.ChatId == chatApp.CurrentUser.Id
+		// notes message: recipient and sender is same person
+		isNotesMessage := isMessageFromMe && isMessageToMe
+
+		if chatType == "group" && chatApp.CurrentChatId == groupChatId {
 			chatApp.addMessageToList(msg)
+		}
+
+		if chatType == "private" {
+			if isNotesMessage && currentChatId == currentUserId {
+				chatApp.addMessageToList(msg)
+			} else if isMessageFromMe && currentChatId == msg.ChatId {
+				chatApp.addMessageToList(msg)
+			} else if isMessageToMe && currentChatId == msg.UserData.Id {
+				chatApp.addMessageToList(msg)
+			}
 		}
 	})
 
 	client.On("/get-messages", func(h *gosocketio.Channel, messages []SavedMessage) {
-		log.Println("Load messages")
+		fmt.Printf("Got Messages count = %d\n", len(messages))
 		chatApp.clearMessagesList()
 		chatApp.MessagesList.setMessages(messages)
 		chatApp.MessagesList.refresh()
+		chatApp.MessageListScroller.ScrollToTop()
+	})
+	client.On("/get-channels", func(h *gosocketio.Channel, channels []Channel) {
+		fmt.Printf("Got channels count = %d\n", len(channels))
+		chatApp.Channels = channels
+		chatApp.refreshChannelList()
+		if chatApp.CurrentChatId == groupChatId {
+			chatApp.ChannelsRadioGroup.SetSelected(GROUP_CHANNEL_TITLE)
+		}
 	})
 }
 
@@ -142,7 +189,8 @@ func (chatApp *ChatApplication) sendRegisterData(username string, password strin
 	}
 }
 
-func (chatApp *ChatApplication) sendMessage(user User, text string) {
+func (chatApp *ChatApplication) sendMessage(text string) {
+	user := chatApp.CurrentUser
 	if chatApp.Connected && chatApp.LoggedIn {
 		chatApp.Client.Emit("/message", Message{user, chatApp.CurrentChatId, text})
 	} else if !chatApp.LoggedIn {
@@ -168,19 +216,85 @@ func (chatApp *ChatApplication) showError(err error) {
 	dialog.ShowError(err, chatApp.Window)
 }
 
+func (chatApp *ChatApplication) loadChannels() {
+	log.Println("Load channels")
+	chatApp.Client.Emit("/get-channels", ChannelsRequest{chatApp.CurrentUser})
+}
+
+func (chatApp *ChatApplication) refreshChannelList() {
+	// Use this function only after replacing channels.
+	// After appending (group.Append) this func will be called automatically
+	var stringChannels []string
+	stringChannels = append(stringChannels, GROUP_CHANNEL_TITLE, NOTES_CHANNEL_TITLE)
+	for _, channel := range chatApp.Channels {
+		stringChannels = append(stringChannels, channel.Title)
+	}
+	chatApp.ChannelsRadioGroup.Options = stringChannels
+	chatApp.ChannelsRadioGroup.Refresh()
+}
+
+func (chatApp *ChatApplication) getChannelId(title string) int64 {
+	for _, channel := range chatApp.Channels {
+		if channel.Title == title {
+			return channel.Id
+		}
+	}
+	if title == NOTES_CHANNEL_TITLE {
+		return chatApp.CurrentUser.Id
+	}
+	return groupChatId // MAIN chat
+}
+
 func (chatApp *ChatApplication) loadMessages(chatId int64) {
 	if !chatApp.Connected || !chatApp.LoggedIn {
 		return
 	}
+	fmt.Printf("Load messages from chatId = %d\n", chatId)
 	client := chatApp.Client
 	client.Emit("/get-messages", MessagesRequest{chatId, chatApp.CurrentUser})
+}
+
+func (chatApp *ChatApplication) isChannelInList(channelId int64) bool {
+	list := chatApp.Channels
+	for _, c := range list {
+		if c.Id == channelId {
+			return true
+		}
+	}
+	return false
+}
+
+func (chatApp *ChatApplication) openChannel(chatId int64) {
+	chatApp.CurrentChatId = chatId
+	chatApp.loadMessages(chatId)
+}
+
+func (chatApp *ChatApplication) openNotesChannel() {
+	chatApp.openChannel(chatApp.CurrentUser.Id)
+}
+
+func (chatApp *ChatApplication) openChannelByUser(user UserPublicInfo) {
+	channelsGroup := chatApp.ChannelsRadioGroup
+
+	if user.Id == chatApp.CurrentUser.Id { // NOTES
+		channelsGroup.SetSelected(NOTES_CHANNEL_TITLE)
+		return
+	}
+
+	if !chatApp.isChannelInList(user.Id) {
+		channelsGroup.Append(user.Username)
+		chatApp.Channels = append(chatApp.Channels, Channel{user.Id, user.Username})
+	}
+	channelsGroup.SetSelected(user.Username)
 }
 
 // -------- BUILD WINDOW----------
 
 func (chatApp *ChatApplication) showLoginDialog(title string) {
 	inputUsername := widget.NewEntry()
+	inputUsername.SetPlaceHolder("username")
 	inputPassword := widget.NewPasswordEntry()
+	inputPassword.SetPlaceHolder("password")
 
 	loginBox := widget.NewVBox(inputUsername, inputPassword)
 	loginBox.Resize(fyne.NewSize(400, 400))
@@ -195,7 +309,9 @@ func (chatApp *ChatApplication) showLoginDialog(title string) {
 
 func (chatApp *ChatApplication) showRegisterDialog(title string) {
 	inputUsername := widget.NewEntry()
+	inputUsername.SetPlaceHolder("username")
 	inputPassword := widget.NewPasswordEntry()
+	inputPassword.SetPlaceHolder("password")
 
 	loginBox := widget.NewVBox(inputUsername, inputPassword)
 	loginBox.Resize(fyne.NewSize(400, 400))
@@ -224,50 +340,51 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 		}
 	})
 
-	group := widget.NewGroup("Profile", login, register)
+	info := widget.NewLabel("")
+	chatApp.ProfileInfo = info
+
+	group := widget.NewGroup("Profile", login, register, info)
 	group.Resize(fyne.NewSize(400, HEIGHT))
 	return group
 }
 
 func buildCenter(chatApp *ChatApplication) *fyne.Container {
-	messagesList := newMessageList()
+	messagesList := newMessageList(func(user UserPublicInfo) {
+		chatApp.openChannelByUser(user)
+	})
 	chatApp.MessagesList = messagesList
 	scroller := widget.NewScrollContainer(messagesList.getContainer())
 	scroller.SetMinSize(fyne.NewSize(500, 500))
+	chatApp.MessageListScroller = scroller
 
 	input := widget.NewEntry()
 	input.SetPlaceHolder("Your message")
 
 	send := widget.NewButton("Send", func() {
 		if input.Text != "" {
-			chatApp.sendMessage(chatApp.CurrentUser, input.Text)
+			chatApp.sendMessage(input.Text)
 			input.SetText("")
 		}
 	})
-	refresh := widget.NewButton("Refresh", func() {
-		chatApp.loadMessages(chatApp.CurrentChatId)
-	})
 
 	top := widget.NewGroup("Messenger", scroller)
-	bottom := widget.NewHBox(input, send, refresh)
+	bottom := widget.NewHBox(input, send)
 
 	layout := layout.NewBorderLayout(top, bottom, nil, nil)
 
 	return fyne.NewContainerWithLayout(layout, top, bottom)
 }
 
-func buildRightSidebar() fyne.Widget {
-	channels := []fyne.Widget{
-		widget.NewLabel("Channel 1"),
-		widget.NewLabel("Channel 2"),
-	}
-	group := widget.NewGroup("Chats")
-	group.Resize(fyne.NewSize(100, HEIGHT))
-
-	for i := 0; i < len(channels); i++ {
-		group.Append(channels[i])
-	}
-	return group
+func buildRightSidebar(chatApp *ChatApplication) fyne.Widget {
+	var stringChannels []string
+	radioGroup := widget.NewRadioGroup(stringChannels, func(changed string) {
+		fmt.Printf("Select channel = %s\n", changed)
+		selectedChatId := chatApp.getChannelId(changed)
+		chatApp.openChannel(selectedChatId)
+	})
+	radioGroup.Required = true
+	chatApp.ChannelsRadioGroup = radioGroup
+	return widget.NewGroup("Channels", radioGroup)
 }
 
 func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
@@ -276,7 +393,7 @@ func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 
 	center := buildCenter(chatApp)
 
-	rightSideBar := buildRightSidebar()
+	rightSideBar := buildRightSidebar(chatApp)
 	return fyne.NewContainerWithLayout(
 		layout.NewBorderLayout(nil, nil, leftSideBar, rightSideBar),
 		leftSideBar,
