@@ -1,5 +1,5 @@
 // models.go
-package main
+package common
 
 type User struct {
 	Id           int64  `json: "id"`
@@ -12,7 +12,7 @@ type UserPublicInfo struct {
 	Username string `json: "username"`
 }
 
-func (user *User) getPublicInfo() UserPublicInfo {
+func (user *User) GetPublicInfo() UserPublicInfo {
 	return UserPublicInfo{user.Id, user.Username}
 }
 
@@ -29,7 +29,7 @@ type SavedMessage struct {
 	CreatedOn int64          `json:"created_on"`
 }
 
-func (msg *SavedMessage) getChatType() string {
+func (msg *SavedMessage) GetChatType() string {
 	if msg.ChatId == 0 {
 		return "group"
 	}
@@ -42,7 +42,7 @@ type Message struct {
 	Text   string `json:"text"`
 }
 
-func (msg *Message) getChatType() string {
+func (msg *Message) GetChatType() string {
 	if msg.ChatId == 0 {
 		return "group"
 	}

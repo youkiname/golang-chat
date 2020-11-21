@@ -1,5 +1,5 @@
 // db
-package main
+package common
 
 import (
 	"database/sql"
@@ -20,7 +20,7 @@ func (adapter *DatabaseAdapter) Close() {
 	adapter.DB.Close()
 }
 
-func (adapter *DatabaseAdapter) connectSqlite(dbName string) {
+func (adapter *DatabaseAdapter) ConnectSqlite(dbName string) {
 	TABLES := []string{
 		"users (id INTEGER PRIMARY KEY, username VARCHAR(64), password_hash VARCHAR(256));",
 
@@ -45,14 +45,14 @@ func (adapter *DatabaseAdapter) connectSqlite(dbName string) {
 		 FOREIGN KEY (chat_id) REFERENCES users(id));`}
 
 	db, err := sql.Open("sqlite3", dbName)
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 
 	// Create initial tables
 	for _, tableData := range TABLES {
 		_, err := db.Exec("CREATE TABLE IF NOT EXISTS " + tableData)
-		if isError(err) {
+		if IsError(err) {
 			panic(err)
 		}
 	}
@@ -60,13 +60,13 @@ func (adapter *DatabaseAdapter) connectSqlite(dbName string) {
 	adapter.DB = db
 }
 
-func (adapter *DatabaseAdapter) getAllUsers() []User {
+func (adapter *DatabaseAdapter) GetAllUsers() []User {
 	db := adapter.DB
 	result := []User{}
 
 	usersSql := sq.Select("*").From("users")
 	rows, err := usersSql.RunWith(db).Query()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	defer rows.Close()
@@ -74,7 +74,7 @@ func (adapter *DatabaseAdapter) getAllUsers() []User {
 	for rows.Next() {
 		user := User{}
 		err := rows.Scan(&user.Id, &user.Username, &user.PasswordHash)
-		if isError(err) {
+		if IsError(err) {
 			log.Println(err)
 			continue
 		}
@@ -84,7 +84,7 @@ func (adapter *DatabaseAdapter) getAllUsers() []User {
 	return result
 }
 
-func (adapter *DatabaseAdapter) getMessagesFromGroup() []SavedMessage {
+func (adapter *DatabaseAdapter) GetMessagesFromGroup() []SavedMessage {
 	result := []SavedMessage{}
 
 	selectSql := sq.Select("messages.*, users.username").
@@ -92,7 +92,7 @@ func (adapter *DatabaseAdapter) getMessagesFromGroup() []SavedMessage {
 		Join("users on messages.user_id = users.id").
 		Where("chat_id = ?", GROUP_CHAT_ID)
 	rows, err := selectSql.RunWith(adapter.DB).Query()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	defer rows.Close()
@@ -101,7 +101,7 @@ func (adapter *DatabaseAdapter) getMessagesFromGroup() []SavedMessage {
 		msg := SavedMessage{}
 		err := rows.Scan(&msg.Id, &msg.Text, &msg.UserData.Id, &msg.ChatId,
 			&msg.CreatedOn, &msg.UserData.Username)
-		if isError(err) {
+		if IsError(err) {
 			log.Println(err)
 			continue
 		}
@@ -111,7 +111,7 @@ func (adapter *DatabaseAdapter) getMessagesFromGroup() []SavedMessage {
 	return result
 }
 
-func (adapter *DatabaseAdapter) getMessagesFromPrivate(fromUserId int64, toUserId int64) []SavedMessage {
+func (adapter *DatabaseAdapter) GetMessagesFromPrivate(fromUserId int64, toUserId int64) []SavedMessage {
 	result := []SavedMessage{}
 
 	selectSql := sq.Select("messages.*, users.username").
@@ -120,7 +120,7 @@ func (adapter *DatabaseAdapter) getMessagesFromPrivate(fromUserId int64, toUserI
 		Where(sq.Or{sq.Eq{"user_id": fromUserId, "chat_id": toUserId},
 			sq.Eq{"user_id": toUserId, "chat_id": fromUserId}})
 	rows, err := selectSql.RunWith(adapter.DB).Query()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	defer rows.Close()
@@ -129,7 +129,7 @@ func (adapter *DatabaseAdapter) getMessagesFromPrivate(fromUserId int64, toUserI
 		msg := SavedMessage{}
 		err := rows.Scan(&msg.Id, &msg.Text, &msg.UserData.Id, &msg.ChatId,
 			&msg.CreatedOn, &msg.UserData.Username)
-		if isError(err) {
+		if IsError(err) {
 			log.Println(err)
 			continue
 		}
@@ -139,21 +139,21 @@ func (adapter *DatabaseAdapter) getMessagesFromPrivate(fromUserId int64, toUserI
 	return result
 }
 
-func (adapter *DatabaseAdapter) getMessagesFromChat(userId int64, chatId int64) []SavedMessage {
+func (adapter *DatabaseAdapter) GetMessagesFromChat(userId int64, chatId int64) []SavedMessage {
 	if chatId == 0 {
-		return adapter.getMessagesFromGroup()
+		return adapter.GetMessagesFromGroup()
 	}
-	return adapter.getMessagesFromPrivate(userId, chatId)
+	return adapter.GetMessagesFromPrivate(userId, chatId)
 }
 
-func (adapter *DatabaseAdapter) getUserById(id int) (User, error) {
+func (adapter *DatabaseAdapter) GetUserById(id int) (User, error) {
 	user := User{}
 
 	selectSql := sq.Select("*").From("users").Where("id = ?", id)
 	row := selectSql.RunWith(adapter.DB).QueryRow()
 
 	err := row.Scan(&user.Id, &user.Username, &user.PasswordHash)
-	if isError(err) {
+	if IsError(err) {
 		return User{}, errors.New("User with id = " + strconv.Itoa(id) +
 			" does not exist. " + err.Error())
 	}
@@ -161,14 +161,14 @@ func (adapter *DatabaseAdapter) getUserById(id int) (User, error) {
 	return user, nil
 }
 
-func (adapter *DatabaseAdapter) getUserByName(username string) (User, error) {
+func (adapter *DatabaseAdapter) GetUserByName(username string) (User, error) {
 	user := User{}
 
 	selectSql := sq.Select("*").From("users").Where("username = ?", username)
 	row := selectSql.RunWith(adapter.DB).QueryRow()
 
 	err := row.Scan(&user.Id, &user.Username, &user.PasswordHash)
-	if isError(err) {
+	if IsError(err) {
 		return User{}, errors.New("User with name = " + username +
 			" does not exist. " + err.Error())
 	}
@@ -176,7 +176,7 @@ func (adapter *DatabaseAdapter) getUserByName(username string) (User, error) {
 	return user, nil
 }
 
-func (adapter *DatabaseAdapter) getChannels(userId int64) []Channel {
+func (adapter *DatabaseAdapter) GetChannels(userId int64) []Channel {
 	result := []Channel{}
 
 	selectSql := sq.Select("saved_channels.chat_id, users.username").
@@ -184,7 +184,7 @@ func (adapter *DatabaseAdapter) getChannels(userId int64) []Channel {
 		Join("users on saved_channels.chat_id = users.id").
 		Where("user_id = ?", userId)
 	rows, err := selectSql.RunWith(adapter.DB).Query()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	defer rows.Close()
@@ -192,7 +192,7 @@ func (adapter *DatabaseAdapter) getChannels(userId int64) []Channel {
 	for rows.Next() {
 		channel := Channel{}
 		err := rows.Scan(&channel.Id, &channel.Title)
-		if isError(err) {
+		if IsError(err) {
 			log.Println(err)
 			continue
 		}
@@ -202,81 +202,81 @@ func (adapter *DatabaseAdapter) getChannels(userId int64) []Channel {
 	return result
 }
 
-func (adapter *DatabaseAdapter) getLastFailedLoginDate(userId int64) int64 {
+func (adapter *DatabaseAdapter) GetLastFailedLoginDate(userId int64) int64 {
 	query := sq.Select("created_on").From("failed_login").
 		Where(sq.Eq{"user_id": userId}).OrderBy("created_on DESC").Limit(1)
 	row := query.RunWith(adapter.DB).QueryRow()
 
 	var result int64 = 0
 	err := row.Scan(&result)
-	if isError(err) {
+	if IsError(err) {
 		return 0
 	}
 
 	return result
 }
 
-func (adapter *DatabaseAdapter) addNewUser(user *User) {
+func (adapter *DatabaseAdapter) AddNewUser(user *User) {
 	insertSql := sq.Insert("users").Columns("username, password_hash").
 		Values(user.Username, user.PasswordHash)
 	result, err := insertSql.RunWith(adapter.DB).Exec()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	user.Id, err = result.LastInsertId()
-	if isError(err) {
+	if IsError(err) {
 		log.Println(err)
 	}
 }
 
-func (adapter *DatabaseAdapter) addNewFailedLogin(userId int64) {
+func (adapter *DatabaseAdapter) AddNewFailedLogin(userId int64) {
 	insertSql := sq.Insert("failed_login").Columns("user_id, created_on").
-		Values(userId, getTimestampNow())
+		Values(userId, GetTimestampNow())
 	_, err := insertSql.RunWith(adapter.DB).Exec()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 }
 
-func (adapter *DatabaseAdapter) addNewMessage(msg Message) SavedMessage {
-	savedMessage := SavedMessage{UserData: msg.User.getPublicInfo(),
+func (adapter *DatabaseAdapter) AddNewMessage(msg Message) SavedMessage {
+	savedMessage := SavedMessage{UserData: msg.User.GetPublicInfo(),
 		ChatId: msg.ChatId, Text: msg.Text}
-	savedMessage.CreatedOn = getTimestampNow()
+	savedMessage.CreatedOn = GetTimestampNow()
 
 	insertSql := sq.Insert("messages").Columns("chat_id, user_id, text, created_on").
 		Values(msg.ChatId, msg.User.Id, msg.Text, savedMessage.CreatedOn)
 
 	result, err := insertSql.RunWith(adapter.DB).Exec()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	savedMessage.Id, err = result.LastInsertId()
-	if isError(err) {
+	if IsError(err) {
 		log.Println(err)
 	}
 	return savedMessage
 }
 
-func (adapter *DatabaseAdapter) addNewChannel(userId int64, chatId int64) {
+func (adapter *DatabaseAdapter) AddNewChannel(userId int64, chatId int64) {
 	// this function adds new user(user_id) to user(chat_id) private relationship
 	insertSql := sq.Insert("saved_channels").Columns("user_id, chat_id").
 		Values(userId, chatId)
 
 	_, err := insertSql.RunWith(adapter.DB).Exec()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 }
 
-func (adapter *DatabaseAdapter) isUserExist(username string) bool {
-	_, err := adapter.getUserByName(username)
-	if !isError(err) {
+func (adapter *DatabaseAdapter) IsUserExist(username string) bool {
+	_, err := adapter.GetUserByName(username)
+	if !IsError(err) {
 		return true
 	}
 	return false
 }
 
-func (adapter *DatabaseAdapter) isChannelExist(userId, chatId int64) bool {
+func (adapter *DatabaseAdapter) IsChannelExist(userId, chatId int64) bool {
 	selectSql := sq.Select("*").From("saved_channels").
 		Where("user_id = ? AND chat_id = ?", userId, chatId)
 	row := selectSql.RunWith(adapter.DB).QueryRow()
@@ -285,34 +285,34 @@ func (adapter *DatabaseAdapter) isChannelExist(userId, chatId int64) bool {
 	var tempUserId int64
 	var tempChatId int64
 	err := row.Scan(&tempId, &tempUserId, &tempChatId)
-	if isError(err) { // not found
+	if IsError(err) { // not found
 		return false
 	}
 	return true
 }
 
-func (adapter *DatabaseAdapter) checkUserPassword(username, passwordHash string) bool {
-	user, err := adapter.getUserByName(username)
-	if !isError(err) && user.PasswordHash == passwordHash {
+func (adapter *DatabaseAdapter) CheckUserPassword(username, passwordHash string) bool {
+	user, err := adapter.GetUserByName(username)
+	if !IsError(err) && user.PasswordHash == passwordHash {
 		return true
 	}
 	return false
 }
 
-func (adapter *DatabaseAdapter) countFailedLogin(userId int64) int {
+func (adapter *DatabaseAdapter) CountFailedLogin(userId int64) int {
 	var count int
 	row := adapter.DB.QueryRow("SELECT COUNT(user_id = ?) FROM failed_login", userId)
 	err := row.Scan(&count)
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 	return count
 }
 
-func (adapter *DatabaseAdapter) clearFailedLogin(userId int64) {
+func (adapter *DatabaseAdapter) ClearFailedLogin(userId int64) {
 	query := sq.Delete("failed_login").Where(sq.Eq{"user_id": userId})
 	_, err := query.RunWith(adapter.DB).Exec()
-	if isError(err) {
+	if IsError(err) {
 		panic(err)
 	}
 }

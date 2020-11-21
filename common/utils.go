@@ -1,5 +1,5 @@
 // utils.go
-package main
+package common
 
 import (
 	"encoding/hex"
@@ -10,7 +10,7 @@ import (
 
 const GROUP_CHAT_ID int64 = 0
 
-func getPasswordHash(password string) string {
+func GetPasswordHash(password string) string {
 	hashedPassword := password
 	for i := 0; i < 10; i++ {
 		hash := sha256.Sum256([]byte(hashedPassword))
@@ -19,11 +19,11 @@ func getPasswordHash(password string) string {
 	return hashedPassword
 }
 
-func getTimestampNow() int64 {
+func GetTimestampNow() int64 {
 	return time.Now().Unix()
 }
 
-func isError(err error) bool {
+func IsError(err error) bool {
 	if err != nil {
 		return true
 	}

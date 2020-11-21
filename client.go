@@ -1,4 +1,4 @@
-// gui.go
+// client.go
 package main
 
 import (
@@ -17,6 +17,9 @@ import (
 
 	"github.com/graarh/golang-socketio"
 	"github.com/graarh/golang-socketio/transport"
+
+	"chat/common"
+	"chat/gui"
 )
 
 const WIDTH int = 1280
@@ -32,17 +35,17 @@ type ChatApplication struct {
 	App                 fyne.App
 	Window              fyne.Window
 	LeftSideBar         *widget.Group
-	MessagesList        *MessageList
+	MessagesList        *gui.MessageList
 	MessageListScroller *widget.ScrollContainer
 	Client              *gosocketio.Client
 	Connected           bool
-	CurrentUser         User
+	CurrentUser         common.User
 	LoggedIn            bool
 	CurrentChatId       int64
 	ProfileInfo         *widget.Label
-	Channels            []Channel
+	Channels            []common.Channel
 	ChannelsRadioGroup  *widget.RadioGroup
-	// messagesStorage map[int][]SavedMessage
+	// messagesStorage map[int][]common.SavedMessage
 }
 
 func (chatApp *ChatApplication) init() {
@@ -65,7 +68,7 @@ func (chatApp *ChatApplication) showWindow() {
 
 func (chatApp *ChatApplication) startReconnectionTrying() {
 	time.Sleep(10 * time.Second)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 5; i++ {
 		if i != 0 {
 			d, _ := time.ParseDuration(fmt.Sprintf("%dm", i))
 			time.Sleep(d)
@@ -80,6 +83,9 @@ func (chatApp *ChatApplication) startReconnectionTrying() {
 				host, port, i+1)
 		}
 	}
+	dialog.ShowInformation(":(", "We couldn't restore connection :(\n"+
+		"Please, try change host information in settings file "+
+		"and restart application.", chatApp.Window)
 }
 
 func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool) bool {
@@ -88,7 +94,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 		gosocketio.GetUrl(host, port, false),
 		transport.GetDefaultWebsocketTransport())
 
-	if isError(err) {
+	if common.IsError(err) {
 		if !isReconnect {
 			info := fmt.Sprintf("Can't connect to host \"%s:%d\"\n"+
 				"Next try after: 10 sec\n"+
@@ -103,7 +109,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
 		chatApp.showError("Disconnected!")
 	})
-	if isError(err) {
+	if common.IsError(err) {
 		chatApp.showError(err.Error())
 		return false
 	}
@@ -111,7 +117,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 	err = client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
 		log.Println("Connected")
 	})
-	if isError(err) {
+	if common.IsError(err) {
 		chatApp.showError(err.Error())
 		return false
 	}
@@ -129,27 +135,27 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 
 func (chatApp *ChatApplication) initClientCallbacks() {
 	client := chatApp.Client
-	client.On("/failed-login", func(h *gosocketio.Channel, errorData LoginError) {
+	client.On("/failed-login", func(h *gosocketio.Channel, errorData common.LoginError) {
 		log.Println(errorData.Description)
 		chatApp.showLoginDialog(errorData.Description)
 		chatApp.LoggedIn = false
 		chatApp.ProfileInfo.SetText("FAILED LOGIN")
 	})
-	client.On("/failed-registeration", func(h *gosocketio.Channel, errorData RegistrationError) {
+	client.On("/failed-registeration", func(h *gosocketio.Channel, errorData common.RegistrationError) {
 		log.Println(errorData.Description)
 		chatApp.showRegisterDialog(errorData.Description)
 		chatApp.LoggedIn = false
 		chatApp.ProfileInfo.SetText("FAILED LOGIN")
 	})
 
-	client.On("/login", func(h *gosocketio.Channel, user User) {
+	client.On("/login", func(h *gosocketio.Channel, user common.User) {
 		log.Println("LOGIN")
 		chatApp.CurrentUser = user
 		chatApp.LoggedIn = true
 		chatApp.ProfileInfo.SetText("WELCOME, " + user.Username)
 		chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + user.Username))
 
-		chatApp.CurrentChatId = GROUP_CHAT_ID
+		chatApp.CurrentChatId = common.GROUP_CHAT_ID
 
 		chatApp.clearMessagesList()
 		chatApp.loadChannels()
@@ -157,16 +163,16 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		// auto selecting this channel in the right sidebar
 	})
 
-	client.On("/message", func(h *gosocketio.Channel, msg SavedMessage) {
+	client.On("/message", func(h *gosocketio.Channel, msg common.SavedMessage) {
 		currentChatId := chatApp.CurrentChatId
 		currentUserId := chatApp.CurrentUser.Id
-		chatType := msg.getChatType()
+		chatType := msg.GetChatType()
 		isMessageFromMe := msg.UserData.Id == chatApp.CurrentUser.Id
 		isMessageToMe := msg.ChatId == chatApp.CurrentUser.Id
 		// notes message: recipient and sender is same person
 		isNotesMessage := isMessageFromMe && isMessageToMe
 
-		if chatType == "group" && chatApp.CurrentChatId == GROUP_CHAT_ID {
+		if chatType == "group" && chatApp.CurrentChatId == common.GROUP_CHAT_ID {
 			chatApp.addMessageToList(msg)
 		}
 
@@ -181,18 +187,18 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		}
 	})
 
-	client.On("/get-messages", func(h *gosocketio.Channel, messages []SavedMessage) {
+	client.On("/get-messages", func(h *gosocketio.Channel, messages []common.SavedMessage) {
 		fmt.Printf("Got Messages count = %d\n", len(messages))
 		chatApp.clearMessagesList()
-		chatApp.MessagesList.setMessages(messages)
-		chatApp.MessagesList.refresh()
+		chatApp.MessagesList.SetMessages(messages)
+		chatApp.MessagesList.Refresh()
 		chatApp.MessageListScroller.ScrollToTop()
 	})
-	client.On("/get-channels", func(h *gosocketio.Channel, channels []Channel) {
+	client.On("/get-channels", func(h *gosocketio.Channel, channels []common.Channel) {
 		fmt.Printf("Got channels count = %d\n", len(channels))
 		chatApp.Channels = channels
 		chatApp.refreshChannelList()
-		if chatApp.CurrentChatId == GROUP_CHAT_ID {
+		if chatApp.CurrentChatId == common.GROUP_CHAT_ID {
 			chatApp.ChannelsRadioGroup.SetSelected(GROUP_CHANNEL_TITLE)
 		}
 	})
@@ -200,7 +206,7 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 
 func (chatApp *ChatApplication) sendLoginData(username string, password string) {
 	if chatApp.Connected {
-		chatApp.Client.Emit("/login", LoginData{username, getPasswordHash(password)})
+		chatApp.Client.Emit("/login", common.LoginData{username, common.GetPasswordHash(password)})
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
@@ -208,7 +214,7 @@ func (chatApp *ChatApplication) sendLoginData(username string, password string) 
 
 func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
 	if chatApp.Connected {
-		chatApp.Client.Emit("/register", LoginData{username, getPasswordHash(password)})
+		chatApp.Client.Emit("/register", common.LoginData{username, common.GetPasswordHash(password)})
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
@@ -217,7 +223,7 @@ func (chatApp *ChatApplication) sendRegisterData(username string, password strin
 func (chatApp *ChatApplication) sendMessage(text string) {
 	user := chatApp.CurrentUser
 	if chatApp.Connected && chatApp.LoggedIn {
-		chatApp.Client.Emit("/message", Message{user, chatApp.CurrentChatId, text})
+		chatApp.Client.Emit("/message", common.Message{user, chatApp.CurrentChatId, text})
 	} else if !chatApp.LoggedIn {
 		chatApp.showError("You are not logged in.")
 	} else {
@@ -225,15 +231,15 @@ func (chatApp *ChatApplication) sendMessage(text string) {
 	}
 }
 
-func (chatApp *ChatApplication) addMessageToList(msg SavedMessage) {
-	chatApp.MessagesList.addMessage(msg)
-	chatApp.MessagesList.refresh()
+func (chatApp *ChatApplication) addMessageToList(msg common.SavedMessage) {
+	chatApp.MessagesList.AddMessage(msg)
+	chatApp.MessagesList.Refresh()
 
 }
 
 func (chatApp *ChatApplication) clearMessagesList() {
-	chatApp.MessagesList.clear()
-	chatApp.MessagesList.refresh()
+	chatApp.MessagesList.Clear()
+	chatApp.MessagesList.Refresh()
 }
 
 func (chatApp *ChatApplication) showError(description string) {
@@ -243,7 +249,7 @@ func (chatApp *ChatApplication) showError(description string) {
 
 func (chatApp *ChatApplication) loadChannels() {
 	log.Println("Load channels")
-	chatApp.Client.Emit("/get-channels", ChannelsRequest{chatApp.CurrentUser})
+	chatApp.Client.Emit("/get-channels", common.ChannelsRequest{chatApp.CurrentUser})
 }
 
 func (chatApp *ChatApplication) refreshChannelList() {
@@ -267,7 +273,7 @@ func (chatApp *ChatApplication) getChannelId(title string) int64 {
 	if title == NOTES_CHANNEL_TITLE {
 		return chatApp.CurrentUser.Id
 	}
-	return GROUP_CHAT_ID // MAIN chat
+	return common.GROUP_CHAT_ID // MAIN chat
 }
 
 func (chatApp *ChatApplication) loadMessages(chatId int64) {
@@ -276,7 +282,7 @@ func (chatApp *ChatApplication) loadMessages(chatId int64) {
 	}
 	fmt.Printf("Load messages from chatId = %d\n", chatId)
 	client := chatApp.Client
-	client.Emit("/get-messages", MessagesRequest{chatId, chatApp.CurrentUser})
+	client.Emit("/get-messages", common.MessagesRequest{chatId, chatApp.CurrentUser})
 }
 
 func (chatApp *ChatApplication) isChannelInList(channelId int64) bool {
@@ -298,7 +304,7 @@ func (chatApp *ChatApplication) openNotesChannel() {
 	chatApp.openChannel(chatApp.CurrentUser.Id)
 }
 
-func (chatApp *ChatApplication) openChannelByUser(user UserPublicInfo) {
+func (chatApp *ChatApplication) openChannelByUser(user common.UserPublicInfo) {
 	channelsGroup := chatApp.ChannelsRadioGroup
 
 	if user.Id == chatApp.CurrentUser.Id { // NOTES
@@ -308,7 +314,7 @@ func (chatApp *ChatApplication) openChannelByUser(user UserPublicInfo) {
 
 	if !chatApp.isChannelInList(user.Id) {
 		channelsGroup.Append(user.Username)
-		chatApp.Channels = append(chatApp.Channels, Channel{user.Id, user.Username})
+		chatApp.Channels = append(chatApp.Channels, common.Channel{user.Id, user.Username})
 	}
 	channelsGroup.SetSelected(user.Username)
 }
@@ -374,11 +380,11 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 }
 
 func buildCenter(chatApp *ChatApplication) *fyne.Container {
-	messagesList := newMessageList(func(user UserPublicInfo) {
+	messagesList := gui.NewMessageList(func(user common.UserPublicInfo) {
 		chatApp.openChannelByUser(user)
 	})
 	chatApp.MessagesList = messagesList
-	scroller := widget.NewScrollContainer(messagesList.getContainer())
+	scroller := widget.NewScrollContainer(messagesList.GetContainer())
 	scroller.SetMinSize(fyne.NewSize(500, 500))
 	chatApp.MessageListScroller = scroller
 
@@ -434,11 +440,11 @@ type HostData struct {
 func saveDefaultHostSettings() {
 	defaultHostData := HostData{DEFAULT_HOST, DEFAULT_PORT}
 	jsonByteData, err := json.Marshal(defaultHostData)
-	if isError(err) {
+	if common.IsError(err) {
 		log.Println(err)
 	}
 	err = ioutil.WriteFile("settings.json", jsonByteData, 0644)
-	if isError(err) {
+	if common.IsError(err) {
 		log.Println(err)
 	}
 }
@@ -446,14 +452,14 @@ func saveDefaultHostSettings() {
 func getHostDataFromSettingsFile() (string, int) {
 	// returns (host, port)
 	f, err := ioutil.ReadFile("settings.json")
-	if isError(err) {
+	if common.IsError(err) {
 		saveDefaultHostSettings()
 		return DEFAULT_HOST, DEFAULT_PORT
 	}
 
 	hostData := HostData{}
 	err = json.Unmarshal([]byte(f), &hostData)
-	if isError(err) {
+	if common.IsError(err) {
 		saveDefaultHostSettings()
 		return DEFAULT_HOST, DEFAULT_PORT
 	}

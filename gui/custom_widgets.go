@@ -1,5 +1,5 @@
 // custom_widgets
-package main
+package gui
 
 import (
 	"image/color"
@@ -8,6 +8,8 @@ import (
 	"fyne.io/fyne/canvas"
 	"fyne.io/fyne/layout"
 	"fyne.io/fyne/widget"
+
+	"chat/common"
 )
 
 var separatorColor = color.RGBA{33, 150, 243, 255}
@@ -21,7 +23,7 @@ type tappableLabel struct {
 	TappedFunc func()
 }
 
-func newTappableLabel(text string, tappedFunc func()) *tappableLabel {
+func NewTappableLabel(text string, tappedFunc func()) *tappableLabel {
 	label := &tappableLabel{}
 	label.TappedFunc = tappedFunc
 	label.ExtendBaseWidget(label)
@@ -65,7 +67,7 @@ type MessageObject struct {
 	container *fyne.Container
 }
 
-func newMessageObject(username string, text string, tappedUsername func()) *MessageObject {
+func NewMessageObject(username string, text string, tappedUsername func()) *MessageObject {
 	messageObj := &MessageObject{}
 	mainContainer := fyne.NewContainerWithLayout(layout.NewVBoxLayout())
 	msgBody := canvas.NewRectangle(msgBodyColor)
@@ -73,7 +75,7 @@ func newMessageObject(username string, text string, tappedUsername func()) *Mess
 	msgBody.StrokeColor = msgStrokeColor
 
 	mainContainer.AddObject(msgBody)
-	mainContainer.AddObject(newTappableLabel(username, tappedUsername))
+	mainContainer.AddObject(NewTappableLabel(username, tappedUsername))
 
 	lines := splitTextToLines(text, MAX_MSG_TEXT_LINE_LENGTH)
 	for _, textLine := range lines {
@@ -90,44 +92,44 @@ func (messageObj *MessageObject) getContainer() *fyne.Container {
 
 type MessageList struct {
 	container        *fyne.Container
-	OnUsernameSelect func(user UserPublicInfo)
+	OnUsernameSelect func(user common.UserPublicInfo)
 }
 
-func newMessageList(OnUsernameSelect func(user UserPublicInfo)) *MessageList {
+func NewMessageList(OnUsernameSelect func(user common.UserPublicInfo)) *MessageList {
 	list := &MessageList{
 		fyne.NewContainerWithLayout(layout.NewVBoxLayout()),
 		OnUsernameSelect}
 	return list
 }
 
-func (c *MessageList) clear() {
+func (c *MessageList) Clear() {
 	var objects []fyne.CanvasObject
 
 	c.container.Objects = objects
 	c.container.Refresh()
 }
 
-func (c *MessageList) addMessage(msg SavedMessage) {
-	messageObject := newMessageObject(msg.UserData.Username, msg.Text, func() {
+func (c *MessageList) AddMessage(msg common.SavedMessage) {
+	messageObject := NewMessageObject(msg.UserData.Username, msg.Text, func() {
 		c.OnUsernameSelect(msg.UserData)
 	})
 	c.container.AddObject(messageObject.container)
 }
 
-func (c *MessageList) setMessages(messages []SavedMessage) {
+func (c *MessageList) SetMessages(messages []common.SavedMessage) {
 	for _, msg := range messages {
-		c.addMessage(msg)
+		c.AddMessage(msg)
 	}
 }
 
-func (c *MessageList) addLabel(text string) {
+func (c *MessageList) AddLabel(text string) {
 	c.container.AddObject(widget.NewLabel(text))
 }
 
-func (c *MessageList) getContainer() *fyne.Container {
+func (c *MessageList) GetContainer() *fyne.Container {
 	return c.container
 }
 
-func (c *MessageList) refresh() {
+func (c *MessageList) Refresh() {
 	c.container.Refresh()
 }
