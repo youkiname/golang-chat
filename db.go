@@ -11,8 +11,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var groupChatId int64 = 0
-
 type DatabaseAdapter struct {
 	dbFileName string
 	DB         *sql.DB
@@ -24,22 +22,27 @@ func (adapter *DatabaseAdapter) Close() {
 
 func (adapter *DatabaseAdapter) connectSqlite(dbName string) {
 	TABLES := []string{
-		"users (id INTEGER PRIMARY KEY, username VARCHAR(64), password_hash VARCHAR(255));",
+		"users (id INTEGER PRIMARY KEY, username VARCHAR(64), password_hash VARCHAR(256));",
+
+		`failed_login (id INTEGER PRIMARY KEY, 
+		 user_id INTEGER NOT NULL, 
+		 created_on INTEGER NOT NULL,
+		 FOREIGN KEY (user_id) REFERENCES users(id));`,
 
 		`messages 
 		(id INTEGER PRIMARY KEY, 
-		text TEXT NOT NULL,
-		user_id INTEGER NOT NULL,
-		chat_id INTEGER NOT NULL,
-		created_on INTEGER NOT NULL,
-		FOREIGN KEY (user_id) REFERENCES users(id));`,
+		 text TEXT NOT NULL,
+		 user_id INTEGER NOT NULL,
+		 chat_id INTEGER NOT NULL,
+		 created_on INTEGER NOT NULL,
+		 FOREIGN KEY (user_id) REFERENCES users(id));`,
 
 		`saved_channels
 		(id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		chat_id INTEGER NOT NULL,
-		FOREIGN KEY (user_id) REFERENCES users(id),
-		FOREIGN KEY (chat_id) REFERENCES users(id));`}
+		 user_id INTEGER NOT NULL,
+		 chat_id INTEGER NOT NULL,
+		 FOREIGN KEY (user_id) REFERENCES users(id),
+		 FOREIGN KEY (chat_id) REFERENCES users(id));`}
 
 	db, err := sql.Open("sqlite3", dbName)
 	if isError(err) {
@@ -87,7 +90,7 @@ func (adapter *DatabaseAdapter) getMessagesFromGroup() []SavedMessage {
 	selectSql := sq.Select("messages.*, users.username").
 		From("messages").
 		Join("users on messages.user_id = users.id").
-		Where("chat_id = ?", groupChatId)
+		Where("chat_id = ?", GROUP_CHAT_ID)
 	rows, err := selectSql.RunWith(adapter.DB).Query()
 	if isError(err) {
 		panic(err)
@@ -199,6 +202,20 @@ func (adapter *DatabaseAdapter) getChannels(userId int64) []Channel {
 	return result
 }
 
+func (adapter *DatabaseAdapter) getLastFailedLoginDate(userId int64) int64 {
+	query := sq.Select("created_on").From("failed_login").
+		Where(sq.Eq{"user_id": userId}).OrderBy("created_on DESC").Limit(1)
+	row := query.RunWith(adapter.DB).QueryRow()
+
+	var result int64 = 0
+	err := row.Scan(&result)
+	if isError(err) {
+		return 0
+	}
+
+	return result
+}
+
 func (adapter *DatabaseAdapter) addNewUser(user *User) {
 	insertSql := sq.Insert("users").Columns("username, password_hash").
 		Values(user.Username, user.PasswordHash)
@@ -212,10 +229,19 @@ func (adapter *DatabaseAdapter) addNewUser(user *User) {
 	}
 }
 
+func (adapter *DatabaseAdapter) addNewFailedLogin(userId int64) {
+	insertSql := sq.Insert("failed_login").Columns("user_id, created_on").
+		Values(userId, getTimestampNow())
+	_, err := insertSql.RunWith(adapter.DB).Exec()
+	if isError(err) {
+		panic(err)
+	}
+}
+
 func (adapter *DatabaseAdapter) addNewMessage(msg Message) SavedMessage {
 	savedMessage := SavedMessage{UserData: msg.User.getPublicInfo(),
 		ChatId: msg.ChatId, Text: msg.Text}
-	savedMessage.CreatedOn = 0
+	savedMessage.CreatedOn = getTimestampNow()
 
 	insertSql := sq.Insert("messages").Columns("chat_id, user_id, text, created_on").
 		Values(msg.ChatId, msg.User.Id, msg.Text, savedMessage.CreatedOn)
@@ -271,4 +297,22 @@ func (adapter *DatabaseAdapter) checkUserPassword(username, passwordHash string)
 		return true
 	}
 	return false
+}
+
+func (adapter *DatabaseAdapter) countFailedLogin(userId int64) int {
+	var count int
+	row := adapter.DB.QueryRow("SELECT COUNT(user_id = ?) FROM failed_login", userId)
+	err := row.Scan(&count)
+	if isError(err) {
+		panic(err)
+	}
+	return count
+}
+
+func (adapter *DatabaseAdapter) clearFailedLogin(userId int64) {
+	query := sq.Delete("failed_login").Where(sq.Eq{"user_id": userId})
+	_, err := query.RunWith(adapter.DB).Exec()
+	if isError(err) {
+		panic(err)
+	}
 }

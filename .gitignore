@@ -6,6 +6,7 @@
 *.dylib
 
 app.db
+settings.json
 
 
 # Test binary, built with `go test -c`

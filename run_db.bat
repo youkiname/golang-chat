@@ -1,1 +1,0 @@
-go build -o db.exe models.go db.go && .\db.exe

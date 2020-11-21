@@ -2,8 +2,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"time"
 
@@ -20,12 +22,10 @@ import (
 const WIDTH int = 1280
 const HEIGHT int = 720
 
-const HOST string = "localhost"
-const PORT int = 3811
+const DEFAULT_HOST = "localhost"
+const DEFAULT_PORT = 3811
 
 const GROUP_CHANNEL_TITLE = "MAIN"
-const groupChatId int64 = 0
-
 const NOTES_CHANNEL_TITLE = "NOTES"
 
 type ChatApplication struct {
@@ -47,7 +47,7 @@ type ChatApplication struct {
 
 func (chatApp *ChatApplication) init() {
 	chatApp.App = app.New()
-	window := chatApp.App.NewWindow("Super chat")
+	window := chatApp.App.NewWindow("Golang chat")
 	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
 
 	window.SetContent(buildMainWindow(chatApp))
@@ -63,22 +63,48 @@ func (chatApp *ChatApplication) showWindow() {
 	chatApp.Window.ShowAndRun()
 }
 
-func (chatApp *ChatApplication) connect() bool {
+func (chatApp *ChatApplication) startReconnectionTrying() {
+	time.Sleep(10 * time.Second)
+	for i := 0; i < 10; i++ {
+		if i != 0 {
+			d, _ := time.ParseDuration(fmt.Sprintf("%dm", i))
+			time.Sleep(d)
+		}
+		host, port := getHostDataFromSettingsFile()
+		fmt.Printf("Try reconnect to: %s:%d\n", host, port)
+		if chatApp.connect(host, port, true) {
+			dialog.ShowInformation("Success!", "Connection restored!", chatApp.Window)
+			return
+		} else {
+			fmt.Printf("Unsuccess reconnect to: %s:%d\nNext try after %d minutes\n",
+				host, port, i+1)
+		}
+	}
+}
+
+func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool) bool {
 	time.Sleep(1 * time.Second)
 	client, err := gosocketio.Dial(
-		gosocketio.GetUrl(HOST, PORT, false),
+		gosocketio.GetUrl(host, port, false),
 		transport.GetDefaultWebsocketTransport())
 
 	if isError(err) {
-		chatApp.showError(err)
+		if !isReconnect {
+			info := fmt.Sprintf("Can't connect to host \"%s:%d\"\n"+
+				"Next try after: 10 sec\n"+
+				"Description: %s\n", host, port, err.Error())
+
+			chatApp.showError(info)
+			go chatApp.startReconnectionTrying()
+		}
 		return false
 	}
 
 	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
-		chatApp.showError(errors.New("Disconnected!"))
+		chatApp.showError("Disconnected!")
 	})
 	if isError(err) {
-		chatApp.showError(err)
+		chatApp.showError(err.Error())
 		return false
 	}
 
@@ -86,7 +112,7 @@ func (chatApp *ChatApplication) connect() bool {
 		log.Println("Connected")
 	})
 	if isError(err) {
-		chatApp.showError(err)
+		chatApp.showError(err.Error())
 		return false
 	}
 
@@ -98,7 +124,6 @@ func (chatApp *ChatApplication) connect() bool {
 	})
 
 	chatApp.initClientCallbacks()
-	client.Emit("/login", LoginData{"vadim", "65ded5353c5ee48d0b7d48c591b8f430"})
 	return true
 }
 
@@ -124,7 +149,7 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		chatApp.ProfileInfo.SetText("WELCOME, " + user.Username)
 		chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + user.Username))
 
-		chatApp.CurrentChatId = groupChatId
+		chatApp.CurrentChatId = GROUP_CHAT_ID
 
 		chatApp.clearMessagesList()
 		chatApp.loadChannels()
@@ -141,7 +166,7 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		// notes message: recipient and sender is same person
 		isNotesMessage := isMessageFromMe && isMessageToMe
 
-		if chatType == "group" && chatApp.CurrentChatId == groupChatId {
+		if chatType == "group" && chatApp.CurrentChatId == GROUP_CHAT_ID {
 			chatApp.addMessageToList(msg)
 		}
 
@@ -167,7 +192,7 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		fmt.Printf("Got channels count = %d\n", len(channels))
 		chatApp.Channels = channels
 		chatApp.refreshChannelList()
-		if chatApp.CurrentChatId == groupChatId {
+		if chatApp.CurrentChatId == GROUP_CHAT_ID {
 			chatApp.ChannelsRadioGroup.SetSelected(GROUP_CHANNEL_TITLE)
 		}
 	})
@@ -175,17 +200,17 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 
 func (chatApp *ChatApplication) sendLoginData(username string, password string) {
 	if chatApp.Connected {
-		chatApp.Client.Emit("/login", LoginData{username, GetMD5Hash(password)})
+		chatApp.Client.Emit("/login", LoginData{username, getPasswordHash(password)})
 	} else {
-		chatApp.showError(errors.New("You are not connected to the server."))
+		chatApp.showError("You are not connected to the server.")
 	}
 }
 
 func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
 	if chatApp.Connected {
-		chatApp.Client.Emit("/register", LoginData{username, GetMD5Hash(password)})
+		chatApp.Client.Emit("/register", LoginData{username, getPasswordHash(password)})
 	} else {
-		chatApp.showError(errors.New("You are not connected to the server."))
+		chatApp.showError("You are not connected to the server.")
 	}
 }
 
@@ -194,9 +219,9 @@ func (chatApp *ChatApplication) sendMessage(text string) {
 	if chatApp.Connected && chatApp.LoggedIn {
 		chatApp.Client.Emit("/message", Message{user, chatApp.CurrentChatId, text})
 	} else if !chatApp.LoggedIn {
-		chatApp.showError(errors.New("You are not logged in."))
+		chatApp.showError("You are not logged in.")
 	} else {
-		chatApp.showError(errors.New("You are not connected to the server."))
+		chatApp.showError("You are not connected to the server.")
 	}
 }
 
@@ -211,9 +236,9 @@ func (chatApp *ChatApplication) clearMessagesList() {
 	chatApp.MessagesList.refresh()
 }
 
-func (chatApp *ChatApplication) showError(err error) {
-	log.Println(err)
-	dialog.ShowError(err, chatApp.Window)
+func (chatApp *ChatApplication) showError(description string) {
+	log.Println(description)
+	dialog.ShowError(errors.New(description), chatApp.Window)
 }
 
 func (chatApp *ChatApplication) loadChannels() {
@@ -242,7 +267,7 @@ func (chatApp *ChatApplication) getChannelId(title string) int64 {
 	if title == NOTES_CHANNEL_TITLE {
 		return chatApp.CurrentUser.Id
 	}
-	return groupChatId // MAIN chat
+	return GROUP_CHAT_ID // MAIN chat
 }
 
 func (chatApp *ChatApplication) loadMessages(chatId int64) {
@@ -329,14 +354,14 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 		if chatApp.Connected {
 			chatApp.showLoginDialog("Login")
 		} else {
-			chatApp.showError(errors.New("You are not connected to the server."))
+			chatApp.showError("You are not connected to the server.")
 		}
 	})
 	register := widget.NewButton("Register", func() {
 		if chatApp.Connected {
 			chatApp.showRegisterDialog("Register")
 		} else {
-			chatApp.showError(errors.New("You are not connected to the server."))
+			chatApp.showError("You are not connected to the server.")
 		}
 	})
 
@@ -401,10 +426,45 @@ func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 }
 
 // ------------------
+type HostData struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+func saveDefaultHostSettings() {
+	defaultHostData := HostData{DEFAULT_HOST, DEFAULT_PORT}
+	jsonByteData, err := json.Marshal(defaultHostData)
+	if isError(err) {
+		log.Println(err)
+	}
+	err = ioutil.WriteFile("settings.json", jsonByteData, 0644)
+	if isError(err) {
+		log.Println(err)
+	}
+}
+
+func getHostDataFromSettingsFile() (string, int) {
+	// returns (host, port)
+	f, err := ioutil.ReadFile("settings.json")
+	if isError(err) {
+		saveDefaultHostSettings()
+		return DEFAULT_HOST, DEFAULT_PORT
+	}
+
+	hostData := HostData{}
+	err = json.Unmarshal([]byte(f), &hostData)
+	if isError(err) {
+		saveDefaultHostSettings()
+		return DEFAULT_HOST, DEFAULT_PORT
+	}
+
+	return hostData.Host, hostData.Port
+}
 
 func main() {
 	chatApp := ChatApplication{}
 	chatApp.init()
-	go chatApp.connect()
+	host, port := getHostDataFromSettingsFile()
+	go chatApp.connect(host, port, false)
 	chatApp.showWindow()
 }

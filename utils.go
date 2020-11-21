@@ -2,13 +2,25 @@
 package main
 
 import (
-	"crypto/md5"
 	"encoding/hex"
+	"time"
+
+	"crypto/sha256"
 )
 
-func GetMD5Hash(text string) string {
-	hash := md5.Sum([]byte(text))
-	return hex.EncodeToString(hash[:])
+const GROUP_CHAT_ID int64 = 0
+
+func getPasswordHash(password string) string {
+	hashedPassword := password
+	for i := 0; i < 10; i++ {
+		hash := sha256.Sum256([]byte(hashedPassword))
+		hashedPassword = hex.EncodeToString(hash[:])
+	}
+	return hashedPassword
+}
+
+func getTimestampNow() int64 {
+	return time.Now().Unix()
 }
 
 func isError(err error) bool {
