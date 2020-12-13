@@ -21,19 +21,19 @@ type Channel struct {
 	Title string `json: "title"`
 }
 
+// message saved to db
 type SavedMessage struct {
-	Id        int64          `json: "id"`
-	UserData  UserPublicInfo `json:"user_data"`
+	Id int64 `json: "id"`
+	// ChatId - recipient
+	// UserData.Id - sender
 	ChatId    int64          `json:"chat_id"`
+	UserData  UserPublicInfo `json:"user_data"`
 	Text      string         `json:"text"`
 	CreatedOn int64          `json:"created_on"`
 }
 
 func (msg *SavedMessage) GetChatType() string {
-	if msg.ChatId == 0 {
-		return "group"
-	}
-	return "private"
+	return getChatType(msg.ChatId)
 }
 
 type Message struct {
@@ -43,10 +43,7 @@ type Message struct {
 }
 
 func (msg *Message) GetChatType() string {
-	if msg.ChatId == 0 {
-		return "group"
-	}
-	return "private"
+	return getChatType(msg.ChatId)
 }
 
 type MessagesRequest struct {
@@ -74,4 +71,11 @@ type RegistrationError struct {
 
 type LoginError struct {
 	Description string `json: "description"`
+}
+
+func getChatType(chatId int64) string {
+	if chatId == 0 {
+		return "group"
+	}
+	return "private"
 }

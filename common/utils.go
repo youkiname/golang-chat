@@ -19,6 +19,14 @@ func GetPasswordHash(password string) string {
 	return hashedPassword
 }
 
+func encryptMessage() {
+
+}
+
+func decryptMessage() {
+
+}
+
 func GetTimestampNow() int64 {
 	return time.Now().Unix()
 }

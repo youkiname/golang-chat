@@ -2,10 +2,9 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+
 	"log"
 	"time"
 
@@ -25,9 +24,6 @@ import (
 const WIDTH int = 1280
 const HEIGHT int = 720
 
-const DEFAULT_HOST = "localhost"
-const DEFAULT_PORT = 3811
-
 const GROUP_CHANNEL_TITLE = "MAIN"
 const NOTES_CHANNEL_TITLE = "NOTES"
 
@@ -45,10 +41,10 @@ type ChatApplication struct {
 	ProfileInfo         *widget.Label
 	Channels            []common.Channel
 	ChannelsRadioGroup  *widget.RadioGroup
-	// messagesStorage map[int][]common.SavedMessage
 }
 
 func (chatApp *ChatApplication) init() {
+	// Creates main window
 	chatApp.App = app.New()
 	window := chatApp.App.NewWindow("Golang chat")
 	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
@@ -63,17 +59,20 @@ func (chatApp *ChatApplication) init() {
 }
 
 func (chatApp *ChatApplication) showWindow() {
+	// shows main window
 	chatApp.Window.ShowAndRun()
 }
 
 func (chatApp *ChatApplication) startReconnectionTrying() {
+	// if connection was lost this function
+	// will try reconnect after 10s, 1m, 2m, 3m, etc...
 	time.Sleep(10 * time.Second)
 	for i := 0; i < 5; i++ {
 		if i != 0 {
-			d, _ := time.ParseDuration(fmt.Sprintf("%dm", i))
-			time.Sleep(d)
+			sleepDuration, _ := time.ParseDuration(fmt.Sprintf("%dm", i))
+			time.Sleep(sleepDuration)
 		}
-		host, port := getHostDataFromSettingsFile()
+		host, port := common.GetHostDataFromSettingsFile()
 		fmt.Printf("Try reconnect to: %s:%d\n", host, port)
 		if chatApp.connect(host, port, true) {
 			dialog.ShowInformation("Success!", "Connection restored!", chatApp.Window)
@@ -89,7 +88,6 @@ func (chatApp *ChatApplication) startReconnectionTrying() {
 }
 
 func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool) bool {
-	time.Sleep(1 * time.Second)
 	client, err := gosocketio.Dial(
 		gosocketio.GetUrl(host, port, false),
 		transport.GetDefaultWebsocketTransport())
@@ -134,6 +132,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 }
 
 func (chatApp *ChatApplication) initClientCallbacks() {
+	// sets callbacks to socket.io client
 	client := chatApp.Client
 	client.On("/failed-login", func(h *gosocketio.Channel, errorData common.LoginError) {
 		log.Println(errorData.Description)
@@ -152,50 +151,32 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 		log.Println("LOGIN")
 		chatApp.CurrentUser = user
 		chatApp.LoggedIn = true
+		chatApp.CurrentChatId = common.GROUP_CHAT_ID
+
 		chatApp.ProfileInfo.SetText("WELCOME, " + user.Username)
 		chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + user.Username))
 
-		chatApp.CurrentChatId = common.GROUP_CHAT_ID
-
 		chatApp.clearMessagesList()
 		chatApp.loadChannels()
-		// have not to load messages. Main channel will be loaded after
-		// auto selecting this channel in the right sidebar
+		chatApp.loadMessages(chatApp.CurrentChatId)
 	})
 
 	client.On("/message", func(h *gosocketio.Channel, msg common.SavedMessage) {
-		currentChatId := chatApp.CurrentChatId
-		currentUserId := chatApp.CurrentUser.Id
-		chatType := msg.GetChatType()
-		isMessageFromMe := msg.UserData.Id == chatApp.CurrentUser.Id
-		isMessageToMe := msg.ChatId == chatApp.CurrentUser.Id
-		// notes message: recipient and sender is same person
-		isNotesMessage := isMessageFromMe && isMessageToMe
-
-		if chatType == "group" && chatApp.CurrentChatId == common.GROUP_CHAT_ID {
+		// adds new message to list after obtaing data from server
+		if chatApp.canDisplayNewMessage(msg) {
 			chatApp.addMessageToList(msg)
-		}
-
-		if chatType == "private" {
-			if isNotesMessage && currentChatId == currentUserId {
-				chatApp.addMessageToList(msg)
-			} else if isMessageFromMe && currentChatId == msg.ChatId {
-				chatApp.addMessageToList(msg)
-			} else if isMessageToMe && currentChatId == msg.UserData.Id {
-				chatApp.addMessageToList(msg)
-			}
 		}
 	})
 
 	client.On("/get-messages", func(h *gosocketio.Channel, messages []common.SavedMessage) {
-		fmt.Printf("Got Messages count = %d\n", len(messages))
+		fmt.Printf("Got Messages. count = %d\n", len(messages))
 		chatApp.clearMessagesList()
 		chatApp.MessagesList.SetMessages(messages)
 		chatApp.MessagesList.Refresh()
-		chatApp.MessageListScroller.ScrollToTop()
+		chatApp.MessageListScroller.ScrollToBottom()
 	})
 	client.On("/get-channels", func(h *gosocketio.Channel, channels []common.Channel) {
-		fmt.Printf("Got channels count = %d\n", len(channels))
+		fmt.Printf("Got channels. count = %d\n", len(channels))
 		chatApp.Channels = channels
 		chatApp.refreshChannelList()
 		if chatApp.CurrentChatId == common.GROUP_CHAT_ID {
@@ -205,22 +186,27 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 }
 
 func (chatApp *ChatApplication) sendLoginData(username string, password string) {
+	// sends new login data to server
 	if chatApp.Connected {
-		chatApp.Client.Emit("/login", common.LoginData{username, common.GetPasswordHash(password)})
+		chatApp.Client.Emit("/login",
+			common.LoginData{username, common.GetPasswordHash(password)})
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
 }
 
 func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
+	// sends new registration data to server
 	if chatApp.Connected {
-		chatApp.Client.Emit("/register", common.LoginData{username, common.GetPasswordHash(password)})
+		chatApp.Client.Emit("/register",
+			common.LoginData{username, common.GetPasswordHash(password)})
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
 }
 
 func (chatApp *ChatApplication) sendMessage(text string) {
+	// sends new message data to server
 	user := chatApp.CurrentUser
 	if chatApp.Connected && chatApp.LoggedIn {
 		chatApp.Client.Emit("/message", common.Message{user, chatApp.CurrentChatId, text})
@@ -229,6 +215,75 @@ func (chatApp *ChatApplication) sendMessage(text string) {
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
+}
+
+func (chatApp *ChatApplication) loadMessages(chatId int64) {
+	// sends getting messages request to server
+	if !chatApp.Connected || !chatApp.LoggedIn {
+		return
+	}
+	fmt.Printf("Load messages from chatId = %d\n", chatId)
+	client := chatApp.Client
+	client.Emit("/get-messages", common.MessagesRequest{chatId, chatApp.CurrentUser})
+}
+
+func (chatApp *ChatApplication) loadChannels() {
+	// sends gettings channels list request to server
+	log.Println("Load channels")
+	chatApp.Client.Emit("/get-channels", common.ChannelsRequest{chatApp.CurrentUser})
+}
+
+func (chatApp *ChatApplication) canDisplayNewMessage(msg common.SavedMessage) bool {
+	// returns true if obtained message suit for displayed channel
+	currentChatId := chatApp.CurrentChatId
+	currentUserId := chatApp.CurrentUser.Id
+	chatType := msg.GetChatType()
+
+	isMessageFromMe := msg.UserData.Id == chatApp.CurrentUser.Id
+	isMessageToMe := msg.ChatId == chatApp.CurrentUser.Id
+	// notes message: recipient and sender is same person
+	isNotesMessage := isMessageFromMe && isMessageToMe
+
+	if chatType == "private" {
+		return isNotesMessage && currentChatId == currentUserId ||
+			isMessageFromMe && currentChatId == msg.ChatId ||
+			isMessageToMe && currentChatId == msg.UserData.Id
+	} else { // message to group chat
+		return chatApp.CurrentChatId == common.GROUP_CHAT_ID
+	}
+}
+
+func (chatApp *ChatApplication) isChannelInList(channelId int64) bool {
+	// returns true if obtained channelId is in channels list
+	list := chatApp.Channels
+	for _, c := range list {
+		if c.Id == channelId {
+			return true
+		}
+	}
+	return false
+}
+
+func (chatApp *ChatApplication) getChannelId(title string) int64 {
+	// returns channelId by title saved in channels list
+	for _, channel := range chatApp.Channels {
+		if channel.Title == title {
+			return channel.Id
+		}
+	}
+	if title == NOTES_CHANNEL_TITLE {
+		return chatApp.CurrentUser.Id
+	}
+	return common.GROUP_CHAT_ID // MAIN CHANNEL
+}
+
+func (chatApp *ChatApplication) openChannel(chatId int64) {
+	chatApp.CurrentChatId = chatId
+	chatApp.loadMessages(chatId)
+}
+
+func (chatApp *ChatApplication) openNotesChannel() {
+	chatApp.openChannel(chatApp.CurrentUser.Id)
 }
 
 func (chatApp *ChatApplication) addMessageToList(msg common.SavedMessage) {
@@ -243,18 +298,17 @@ func (chatApp *ChatApplication) clearMessagesList() {
 }
 
 func (chatApp *ChatApplication) showError(description string) {
+	// shows child window with error info
 	log.Println(description)
 	dialog.ShowError(errors.New(description), chatApp.Window)
 }
 
-func (chatApp *ChatApplication) loadChannels() {
-	log.Println("Load channels")
-	chatApp.Client.Emit("/get-channels", common.ChannelsRequest{chatApp.CurrentUser})
-}
-
 func (chatApp *ChatApplication) refreshChannelList() {
-	// Use this function only after replacing channels.
-	// After appending (group.Append) this func will be called automatically
+	// refresh left sidebar with channels list
+	// --------------------------------
+	// Use this function only after replacing all channels.
+	// For example, after new person login.
+	// After appending (group.Append) this func will be called automatically.
 	var stringChannels []string
 	stringChannels = append(stringChannels, GROUP_CHANNEL_TITLE, NOTES_CHANNEL_TITLE)
 	for _, channel := range chatApp.Channels {
@@ -264,50 +318,12 @@ func (chatApp *ChatApplication) refreshChannelList() {
 	chatApp.ChannelsRadioGroup.Refresh()
 }
 
-func (chatApp *ChatApplication) getChannelId(title string) int64 {
-	for _, channel := range chatApp.Channels {
-		if channel.Title == title {
-			return channel.Id
-		}
-	}
-	if title == NOTES_CHANNEL_TITLE {
-		return chatApp.CurrentUser.Id
-	}
-	return common.GROUP_CHAT_ID // MAIN chat
-}
-
-func (chatApp *ChatApplication) loadMessages(chatId int64) {
-	if !chatApp.Connected || !chatApp.LoggedIn {
-		return
-	}
-	fmt.Printf("Load messages from chatId = %d\n", chatId)
-	client := chatApp.Client
-	client.Emit("/get-messages", common.MessagesRequest{chatId, chatApp.CurrentUser})
-}
-
-func (chatApp *ChatApplication) isChannelInList(channelId int64) bool {
-	list := chatApp.Channels
-	for _, c := range list {
-		if c.Id == channelId {
-			return true
-		}
-	}
-	return false
-}
-
-func (chatApp *ChatApplication) openChannel(chatId int64) {
-	chatApp.CurrentChatId = chatId
-	chatApp.loadMessages(chatId)
-}
-
-func (chatApp *ChatApplication) openNotesChannel() {
-	chatApp.openChannel(chatApp.CurrentUser.Id)
-}
-
 func (chatApp *ChatApplication) openChannelByUser(user common.UserPublicInfo) {
+	// selects obtained username in channels radio group
+	// or creates new channel if this username was not be added before
 	channelsGroup := chatApp.ChannelsRadioGroup
 
-	if user.Id == chatApp.CurrentUser.Id { // NOTES
+	if user.Id == chatApp.CurrentUser.Id { // NOTES CHANNEL
 		channelsGroup.SetSelected(NOTES_CHANNEL_TITLE)
 		return
 	}
@@ -322,6 +338,7 @@ func (chatApp *ChatApplication) openChannelByUser(user common.UserPublicInfo) {
 // -------- BUILD WINDOW----------
 
 func (chatApp *ChatApplication) showLoginDialog(title string) {
+	// creates and shows child window with login form
 	inputUsername := widget.NewEntry()
 	inputUsername.SetPlaceHolder("username")
 	inputPassword := widget.NewPasswordEntry()
@@ -339,6 +356,7 @@ func (chatApp *ChatApplication) showLoginDialog(title string) {
 }
 
 func (chatApp *ChatApplication) showRegisterDialog(title string) {
+	// creates and shows child window with registration form
 	inputUsername := widget.NewEntry()
 	inputUsername.SetPlaceHolder("username")
 	inputPassword := widget.NewPasswordEntry()
@@ -356,6 +374,8 @@ func (chatApp *ChatApplication) showRegisterDialog(title string) {
 }
 
 func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
+	// creates login and register page
+	// sets login and register buttons callbacks
 	login := widget.NewButton("Login", func() {
 		if chatApp.Connected {
 			chatApp.showLoginDialog("Login")
@@ -365,12 +385,13 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 	})
 	register := widget.NewButton("Register", func() {
 		if chatApp.Connected {
-			chatApp.showRegisterDialog("Register")
+			chatApp.showRegisterDialog("Registration")
 		} else {
 			chatApp.showError("You are not connected to the server.")
 		}
 	})
 
+	// info about previous users logged in
 	info := widget.NewLabel("")
 	chatApp.ProfileInfo = info
 
@@ -380,6 +401,7 @@ func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
 }
 
 func buildCenter(chatApp *ChatApplication) *fyne.Container {
+	// creates messenger page: messages list and text input
 	messagesList := gui.NewMessageList(func(user common.UserPublicInfo) {
 		chatApp.openChannelByUser(user)
 	})
@@ -407,6 +429,7 @@ func buildCenter(chatApp *ChatApplication) *fyne.Container {
 }
 
 func buildRightSidebar(chatApp *ChatApplication) fyne.Widget {
+	// creates radio group with channel selecting callback
 	var stringChannels []string
 	radioGroup := widget.NewRadioGroup(stringChannels, func(changed string) {
 		fmt.Printf("Select channel = %s\n", changed)
@@ -419,6 +442,7 @@ func buildRightSidebar(chatApp *ChatApplication) fyne.Widget {
 }
 
 func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
+	// returns container with messenger page and sidebars
 	leftSideBar := buildLeftSidebar(chatApp)
 	chatApp.LeftSideBar = leftSideBar
 
@@ -431,46 +455,10 @@ func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 		center, rightSideBar)
 }
 
-// ------------------
-type HostData struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
-}
-
-func saveDefaultHostSettings() {
-	defaultHostData := HostData{DEFAULT_HOST, DEFAULT_PORT}
-	jsonByteData, err := json.Marshal(defaultHostData)
-	if common.IsError(err) {
-		log.Println(err)
-	}
-	err = ioutil.WriteFile("settings.json", jsonByteData, 0644)
-	if common.IsError(err) {
-		log.Println(err)
-	}
-}
-
-func getHostDataFromSettingsFile() (string, int) {
-	// returns (host, port)
-	f, err := ioutil.ReadFile("settings.json")
-	if common.IsError(err) {
-		saveDefaultHostSettings()
-		return DEFAULT_HOST, DEFAULT_PORT
-	}
-
-	hostData := HostData{}
-	err = json.Unmarshal([]byte(f), &hostData)
-	if common.IsError(err) {
-		saveDefaultHostSettings()
-		return DEFAULT_HOST, DEFAULT_PORT
-	}
-
-	return hostData.Host, hostData.Port
-}
-
 func main() {
 	chatApp := ChatApplication{}
 	chatApp.init()
-	host, port := getHostDataFromSettingsFile()
+	host, port := common.GetHostDataFromSettingsFile()
 	go chatApp.connect(host, port, false)
 	chatApp.showWindow()
 }
