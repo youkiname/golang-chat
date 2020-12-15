@@ -3,26 +3,31 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/graarh/golang-socketio"
 	"github.com/graarh/golang-socketio/transport"
+	"github.com/satori/go.uuid"
 
 	"chat/common"
+	"chat/db"
+	"chat/models"
 )
 
 const FAILED_LOGIN_LIMIT int = 5
 const FAILED_LOGIN_TIME_LIMIT int = 2 * 60 // 2 minutes
 
 type ServerApp struct {
-	Server         *gosocketio.Server
-	ConnectedUsers map[string]common.UserPublicInfo // map: socket ID -> UserData
-	DB             common.DatabaseAdapter
+	Server    *gosocketio.Server
+	Sessions  map[string]models.Session // map: socket ID -> Session data
+	CommonKey uuid.UUID                 // common key for group channel
+	DB        db.DatabaseAdapter
 }
 
-func getRemainedLoginAttemps(userId int64, db common.DatabaseAdapter) int {
+func getRemainedLoginAttemps(userId int64, db db.DatabaseAdapter) int {
 	// returns remained attemps count.
 	// And clears unsuccessful login count if it is no longer relevant
 
@@ -40,23 +45,18 @@ func getRemainedLoginAttemps(userId int64, db common.DatabaseAdapter) int {
 }
 
 func (app *ServerApp) Init() {
-	// connects to db. Sets callbacks to socket.io server
-	connectedUsers := make(map[string]common.UserPublicInfo)
-	app.ConnectedUsers = connectedUsers
+	// Connects to db. Generate common key (for group channel)
+	// And sets callbacks to socket.io server
+	app.Sessions = make(map[string]models.Session)
 
-	db := common.DatabaseAdapter{}
+	db := db.DatabaseAdapter{}
 	db.ConnectSqlite("app.db")
 	app.DB = db
 
 	server := gosocketio.NewServer(transport.GetDefaultWebsocketTransport())
 
-	server.On(gosocketio.OnConnection, func(c *gosocketio.Channel) {
-		log.Println("Connected " + c.Id())
-	})
-	server.On(gosocketio.OnDisconnection, func(c *gosocketio.Channel) {
-		log.Println("Disconnected " + c.Id())
-		app.RemoveConnectedUser(c.Id())
-	})
+	server.On(gosocketio.OnConnection, app.processConnection)
+	server.On(gosocketio.OnDisconnection, app.processDisconnection)
 
 	server.On("/login", app.processNewLogin)
 	server.On("/register", app.processNewRegistration)
@@ -79,12 +79,22 @@ func (app *ServerApp) CloseDB() {
 	app.DB.Close()
 }
 
-func (app *ServerApp) processNewLogin(c *gosocketio.Channel, data common.LoginData) {
-	user, err := app.DB.GetUserByName(data.Username)
+func (app *ServerApp) processConnection(c *gosocketio.Channel) {
+	log.Println("Connected " + c.Id())
+}
+
+func (app *ServerApp) processDisconnection(c *gosocketio.Channel) {
+	log.Println("Disconnected " + c.Id())
+	app.removeSession(c.Id())
+}
+
+func (app *ServerApp) processNewLogin(c *gosocketio.Channel, authData models.AuthRequest) {
+	user, err := app.DB.GetUserByName(authData.Username)
 	isUsernameValid := !common.IsError(err)
 
 	remainedLoginAttempts := getRemainedLoginAttemps(user.Id, app.DB)
-	isPasswordCorrect := app.DB.CheckUserPassword(data.Username, data.PasswordHash)
+	isPasswordCorrect := app.DB.CheckUserPassword(
+		authData.Username, authData.PasswordHash)
 
 	isLoginSuccessful := isPasswordCorrect && isUsernameValid &&
 		remainedLoginAttempts > 0
@@ -97,95 +107,105 @@ func (app *ServerApp) processNewLogin(c *gosocketio.Channel, data common.LoginDa
 	}
 }
 
-func (app *ServerApp) processSuccessfulLogin(c *gosocketio.Channel, user common.User) {
+func (app *ServerApp) processSuccessfulLogin(c *gosocketio.Channel, user models.User) {
 	log.Println("New login " + user.Username)
-	app.AddConnectedUser(c.Id(), user.GetPublicInfo())
-	app.DB.ClearFailedLogin(user.Id)
+	newSession := app.createSession(c.Id(), user)
 
+	app.DB.ClearFailedLogin(user.Id)
+	app.PrintSessions()
 	c.Join("main")
-	c.Emit("/login", user)
+	c.Emit("/login", models.SuccessfulAuth{
+		User:      user,
+		SecretKey: newSession.SecretKey})
 }
 
 func (app *ServerApp) processUnsuccessfulLogin(c *gosocketio.Channel,
-	user common.User, isUsernameValid bool, remainedLoginAttempts int) {
+	user models.User, isUsernameValid bool, remainedLoginAttempts int) {
+	errorDescription := ""
 	if !isUsernameValid {
-		c.Emit("/failed-login", common.LoginError{"Username is not correct."})
+		errorDescription = "Username is not correct."
 	} else if remainedLoginAttempts > 0 {
 		app.DB.AddNewFailedLogin(user.Id)
-		c.Emit("/failed-login", common.LoginError{fmt.Sprintf(
+		errorDescription = fmt.Sprintf(
 			"Password is not correct. You can try again: %d times",
-			remainedLoginAttempts)})
+			remainedLoginAttempts)
 	} else {
-		c.Emit("/failed-login", common.LoginError{fmt.Sprintf(
+		errorDescription = fmt.Sprintf(
 			"You have tried login more than %d times. This username was blocked for 2 minutes.",
-			FAILED_LOGIN_LIMIT)})
+			FAILED_LOGIN_LIMIT)
 	}
+	c.Emit("/failed-login", models.AuthError{errorDescription, "login"})
 }
 
-func (app *ServerApp) processNewRegistration(c *gosocketio.Channel, data common.LoginData) {
-	if !isValid(data.Username) {
-		c.Emit("/failed-registeration",
-			common.LoginError{"Username '" + data.Username + "' is not valid."})
-	} else if app.DB.IsUserExist(data.Username) {
-		c.Emit("/failed-registeration",
-			common.LoginError{"Username " + data.Username + " already exists."})
+func (app *ServerApp) processNewRegistration(c *gosocketio.Channel, authData models.AuthRequest) {
+	authError := models.AuthError{Description: "", Process: "registration"}
+	if !isValid(authData.Username) {
+		authError.Description = "Username " + authData.Username + " is not valid."
+		c.Emit("/failed-registeration", authError)
+	} else if app.DB.IsUserExist(authData.Username) {
+		authError.Description = "Username " + authData.Username + " already exists."
+		c.Emit("/failed-registeration", authError)
 	} else {
-		user := common.User{Username: data.Username, PasswordHash: data.PasswordHash}
-		app.DB.AddNewUser(&user)
-
-		app.AddConnectedUser(c.Id(), user.GetPublicInfo())
-
-		c.Join("main")
-		c.Emit("/login", user)
+		user := models.User{Username: authData.Username}
+		app.DB.AddNewUser(&user, authData.PasswordHash)
+		app.processSuccessfulLogin(c, user)
 	}
 }
 
-func (app *ServerApp) processNewMessage(c *gosocketio.Channel, msg common.Message) {
-	if app.DB.CheckUserPassword(msg.User.Username, msg.User.PasswordHash) {
-		savedMessage := app.DB.AddNewMessage(msg)
-		if msg.GetChatType() == "group" {
-			c.BroadcastTo("main", "/message", savedMessage)
-		} else if msg.ChatId == msg.User.Id {
-			// private notes. like saved messages in telegram.
-			c.Emit("/message", savedMessage)
-		} else { // from user to user. Personal messages.
-			if app.TrySaveNewChannel(msg) {
-				// send new channels to recipient (if he is online).
-				app.EmitToUser(msg.ChatId, "/get-channels", app.DB.GetChannels(msg.ChatId))
-			}
-			c.Emit("/message", savedMessage)
-			app.EmitToUser(msg.ChatId, "/message", savedMessage)
-		}
-	}
-}
-
-func (app *ServerApp) processMessagesRequest(c *gosocketio.Channel, requestData common.MessagesRequest) {
-	user := requestData.User
-	chatId := requestData.ChatId
-	if app.DB.CheckUserPassword(user.Username, user.PasswordHash) {
-		c.Emit("/get-messages", app.DB.GetMessagesFromChat(user.Id, chatId))
-	}
-}
-
-func (app *ServerApp) processChannelsRequest(c *gosocketio.Channel, requestData common.ChannelsRequest) {
-	user := requestData.User
-	if !app.DB.CheckUserPassword(user.Username, user.PasswordHash) {
+func (app *ServerApp) processNewMessage(c *gosocketio.Channel, msg models.Message) {
+	secretKey, err := app.getClientSecretKey(c.Id(), msg.User)
+	if common.IsError(err) {
 		return
 	}
-	c.Emit("/get-channels", app.DB.GetChannels(user.Id))
+	savedMessage := app.DB.AddNewMessage(msg)
+	if msg.GetChatType() == "group" {
+		app.EmitToAll("/message", savedMessage)
+		return
+	}
+	if msg.ChatId != msg.User.Id { // Personal message
+		if app.trySaveNewChannel(msg) {
+			// send new channels to recipient (if he is online).
+			pack := models.ChannelsPack{app.DB.GetChannels(msg.ChatId)}
+			app.EmitToUser(msg.ChatId, "/get-channels", pack)
+		}
+		app.EmitToUser(msg.ChatId, "/message", savedMessage)
+	}
+	c.Emit("/message", savedMessage.EncryptWith(secretKey))
 }
 
-func (app *ServerApp) PrintConnectedUsers() {
-	users := app.ConnectedUsers
-	json_users, err := json.MarshalIndent(users, "", "    ")
+func (app *ServerApp) processMessagesRequest(c *gosocketio.Channel,
+	requestData models.MessagesRequest) {
+	secretKey, err := app.getClientSecretKey(c.Id(), requestData.User)
+	if common.IsError(err) {
+		return
+	}
+	user := requestData.User
+	chatId := requestData.ChatId
+	messages := app.DB.GetMessagesFromChat(user.Id, chatId)
+	pack := models.SavedMessagesPack{messages}
+	c.Emit("/get-messages", pack.EncryptWith(secretKey))
+}
+
+func (app *ServerApp) processChannelsRequest(c *gosocketio.Channel,
+	requestData models.ChannelsRequest) {
+	secretKey, err := app.getClientSecretKey(c.Id(), requestData.User)
+	if common.IsError(err) {
+		return
+	}
+	pack := models.ChannelsPack{app.DB.GetChannels(requestData.User.Id)}
+	c.Emit("/get-channels", pack.EncryptWith(secretKey))
+}
+
+func (app *ServerApp) PrintSessions() {
+	jsonSessions, err := json.MarshalIndent(app.Sessions, "", "    ")
 	if common.IsError(err) {
 		log.Println(err)
 	}
-	fmt.Printf("Connected Users %d:\n", len(users))
-	fmt.Println(string(json_users))
+	fmt.Printf("Connected Users %d:\n", len(app.Sessions))
+	fmt.Println(string(jsonSessions))
 }
 
-func (app *ServerApp) TrySaveNewChannel(msg common.Message) bool {
+func (app *ServerApp) trySaveNewChannel(msg models.Message) bool {
 	// return true if new channel was saved
 	db := app.DB
 	result := false
@@ -202,25 +222,51 @@ func (app *ServerApp) TrySaveNewChannel(msg common.Message) bool {
 	return result
 }
 
-func (app *ServerApp) AddConnectedUser(socketId string, userData common.UserPublicInfo) {
-	users := app.ConnectedUsers
-	users[socketId] = userData
+func (app *ServerApp) createSession(socketId string, user models.User) models.Session {
+	newSession := models.Session{
+		User:      user,
+		SecretKey: uuid.NewV4()}
+
+	app.Sessions[socketId] = newSession
+	return newSession
 }
 
-func (app *ServerApp) RemoveConnectedUser(socketId string) {
-	delete(app.ConnectedUsers, socketId)
+func (app *ServerApp) getClientSecretKey(socketId string, user models.User) (uuid.UUID, error) {
+	session := app.Sessions[socketId]
+	if session.User.Id == user.Id && session.User.Username == user.Username {
+		return session.SecretKey, nil
+	}
+	return uuid.UUID{}, errors.New("Incorrect userId or username")
 }
 
-func (app *ServerApp) EmitToUser(userId int64, method string, args interface{}) {
-	// emit if user is online. To all connected clients with this account
-	for socketId, userData := range app.ConnectedUsers {
-		if userData.Id == userId {
+func (app *ServerApp) removeSession(socketId string) {
+	delete(app.Sessions, socketId)
+}
+
+func (app *ServerApp) EmitToUser(userId int64, method string, data models.Encryptable) {
+	// emit if user is online. To all connected clients with this account.
+	// data will be encrypted.
+	for socketId, session := range app.Sessions {
+		if session.User.Id == userId {
 			channel, err := app.Server.GetChannel(socketId)
 			if !common.IsError(err) {
-				channel.Emit(method, args)
+				channel.Emit(method, data.EncryptWith(session.SecretKey))
 			} else {
 				log.Println(err)
 			}
+		}
+	}
+}
+
+func (app *ServerApp) EmitToAll(method string, data models.Encryptable) {
+	// emit to all online clients.
+	// data will be encrypted.
+	for socketId, session := range app.Sessions {
+		channel, err := app.Server.GetChannel(socketId)
+		if !common.IsError(err) {
+			channel.Emit(method, data.EncryptWith(session.SecretKey))
+		} else {
+			log.Println(err)
 		}
 	}
 }

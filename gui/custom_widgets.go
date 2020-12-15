@@ -9,7 +9,7 @@ import (
 	"fyne.io/fyne/layout"
 	"fyne.io/fyne/widget"
 
-	"chat/common"
+	"chat/models"
 )
 
 var separatorColor = color.RGBA{33, 150, 243, 255}
@@ -92,44 +92,44 @@ func (messageObj *MessageObject) getContainer() *fyne.Container {
 
 type MessageList struct {
 	container        *fyne.Container
-	OnUsernameSelect func(user common.UserPublicInfo)
+	OnUsernameSelect func(user models.User)
 }
 
-func NewMessageList(OnUsernameSelect func(user common.UserPublicInfo)) *MessageList {
+func NewMessageList(OnUsernameSelect func(user models.User)) *MessageList {
 	list := &MessageList{
 		fyne.NewContainerWithLayout(layout.NewVBoxLayout()),
 		OnUsernameSelect}
 	return list
 }
 
-func (c *MessageList) Clear() {
+func (list *MessageList) Clear() {
 	var objects []fyne.CanvasObject
 
-	c.container.Objects = objects
-	c.container.Refresh()
+	list.container.Objects = objects
+	list.container.Refresh()
 }
 
-func (c *MessageList) AddMessage(msg common.SavedMessage) {
-	messageObject := NewMessageObject(msg.UserData.Username, msg.Text, func() {
-		c.OnUsernameSelect(msg.UserData)
+func (list *MessageList) AddMessage(msg models.SavedMessage) {
+	messageObject := NewMessageObject(msg.User.Username, msg.Text, func() {
+		list.OnUsernameSelect(msg.User)
 	})
-	c.container.AddObject(messageObject.container)
+	list.container.AddObject(messageObject.container)
 }
 
-func (c *MessageList) SetMessages(messages []common.SavedMessage) {
+func (list *MessageList) SetMessages(messages []models.SavedMessage) {
 	for _, msg := range messages {
-		c.AddMessage(msg)
+		list.AddMessage(msg)
 	}
 }
 
-func (c *MessageList) AddLabel(text string) {
-	c.container.AddObject(widget.NewLabel(text))
+func (list *MessageList) AddLabel(text string) {
+	list.container.AddObject(widget.NewLabel(text))
 }
 
-func (c *MessageList) GetContainer() *fyne.Container {
-	return c.container
+func (list *MessageList) GetContainer() *fyne.Container {
+	return list.container
 }
 
-func (c *MessageList) Refresh() {
-	c.container.Refresh()
+func (list *MessageList) Refresh() {
+	list.container.Refresh()
 }
