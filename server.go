@@ -12,9 +12,10 @@ import (
 	"github.com/graarh/golang-socketio/transport"
 	"github.com/satori/go.uuid"
 
-	"chat/common"
 	"chat/db"
+	"chat/encrypt"
 	"chat/models"
+	"chat/utils"
 )
 
 const FAILED_LOGIN_LIMIT int = 5
@@ -23,7 +24,7 @@ const FAILED_LOGIN_TIME_LIMIT int = 2 * 60 // 2 minutes
 type ServerApp struct {
 	Server    *gosocketio.Server
 	Sessions  map[string]models.Session // map: socket ID -> Session data
-	CommonKey uuid.UUID                 // common key for group channel
+	CommonKey uuid.UUID
 	DB        db.DatabaseAdapter
 }
 
@@ -37,7 +38,7 @@ func getRemainedLoginAttemps(userId int64, db db.DatabaseAdapter) int {
 	}
 
 	lastFailedLoginDate := db.GetLastFailedLoginDate(userId)
-	if lastFailedLoginDate+int64(FAILED_LOGIN_TIME_LIMIT) < common.GetTimestampNow() {
+	if lastFailedLoginDate+int64(FAILED_LOGIN_TIME_LIMIT) < utils.GetTimestampNow() {
 		db.ClearFailedLogin(userId)
 		return FAILED_LOGIN_LIMIT
 	}
@@ -45,10 +46,10 @@ func getRemainedLoginAttemps(userId int64, db db.DatabaseAdapter) int {
 }
 
 func (app *ServerApp) Init() {
-	// Connects to db. Generate common key (for group channel)
+	// Connects to db. Generate utils key (for group channel)
 	// And sets callbacks to socket.io server
 	app.Sessions = make(map[string]models.Session)
-
+	app.CommonKey = uuid.FromBytesOrNil([]byte(utils.COMMON_SECRET_KEY))
 	db := db.DatabaseAdapter{}
 	db.ConnectSqlite("app.db")
 	app.DB = db
@@ -88,9 +89,11 @@ func (app *ServerApp) processDisconnection(c *gosocketio.Channel) {
 	app.removeSession(c.Id())
 }
 
-func (app *ServerApp) processNewLogin(c *gosocketio.Channel, authData models.AuthRequest) {
+func (app *ServerApp) processNewLogin(c *gosocketio.Channel, encryptedAuthData string) {
+	authData := models.AuthRequest{}
+	encrypt.Decrypt(app.CommonKey, encryptedAuthData, &authData)
 	user, err := app.DB.GetUserByName(authData.Username)
-	isUsernameValid := !common.IsError(err)
+	isUsernameValid := !utils.IsError(err)
 
 	remainedLoginAttempts := getRemainedLoginAttemps(user.Id, app.DB)
 	isPasswordCorrect := app.DB.CheckUserPassword(
@@ -114,9 +117,8 @@ func (app *ServerApp) processSuccessfulLogin(c *gosocketio.Channel, user models.
 	app.DB.ClearFailedLogin(user.Id)
 	app.PrintSessions()
 	c.Join("main")
-	c.Emit("/login", models.SuccessfulAuth{
-		User:      user,
-		SecretKey: newSession.SecretKey})
+	authData := models.SuccessfulAuth{User: user, SecretKey: newSession.SecretKey}
+	c.Emit("/login", encrypt.Encrypt(app.CommonKey, authData))
 }
 
 func (app *ServerApp) processUnsuccessfulLogin(c *gosocketio.Channel,
@@ -137,7 +139,9 @@ func (app *ServerApp) processUnsuccessfulLogin(c *gosocketio.Channel,
 	c.Emit("/failed-login", models.AuthError{errorDescription, "login"})
 }
 
-func (app *ServerApp) processNewRegistration(c *gosocketio.Channel, authData models.AuthRequest) {
+func (app *ServerApp) processNewRegistration(c *gosocketio.Channel, encryptedAuthData string) {
+	authData := models.AuthRequest{}
+	encrypt.Decrypt(app.CommonKey, encryptedAuthData, &authData)
 	authError := models.AuthError{Description: "", Process: "registration"}
 	if !isValid(authData.Username) {
 		authError.Description = "Username " + authData.Username + " is not valid."
@@ -152,11 +156,14 @@ func (app *ServerApp) processNewRegistration(c *gosocketio.Channel, authData mod
 	}
 }
 
-func (app *ServerApp) processNewMessage(c *gosocketio.Channel, msg models.Message) {
-	secretKey, err := app.getClientSecretKey(c.Id(), msg.User)
-	if common.IsError(err) {
+func (app *ServerApp) processNewMessage(c *gosocketio.Channel, encryptedMessage string) {
+	secretKey, err := app.getClientSecretKey(c.Id())
+	if utils.IsError(err) {
 		return
 	}
+	msg := models.Message{}
+	encrypt.Decrypt(secretKey, encryptedMessage, &msg)
+
 	savedMessage := app.DB.AddNewMessage(msg)
 	if msg.GetChatType() == "group" {
 		app.EmitToAll("/message", savedMessage)
@@ -170,35 +177,35 @@ func (app *ServerApp) processNewMessage(c *gosocketio.Channel, msg models.Messag
 		}
 		app.EmitToUser(msg.ChatId, "/message", savedMessage)
 	}
-	c.Emit("/message", savedMessage.EncryptWith(secretKey))
+	c.Emit("/message", encrypt.Encrypt(secretKey, savedMessage))
 }
 
 func (app *ServerApp) processMessagesRequest(c *gosocketio.Channel,
 	requestData models.MessagesRequest) {
-	secretKey, err := app.getClientSecretKey(c.Id(), requestData.User)
-	if common.IsError(err) {
+	secretKey, err := app.getClientSecretKey(c.Id())
+	if utils.IsError(err) {
 		return
 	}
 	user := requestData.User
 	chatId := requestData.ChatId
 	messages := app.DB.GetMessagesFromChat(user.Id, chatId)
 	pack := models.SavedMessagesPack{messages}
-	c.Emit("/get-messages", pack.EncryptWith(secretKey))
+	c.Emit("/get-messages", encrypt.Encrypt(secretKey, pack))
 }
 
 func (app *ServerApp) processChannelsRequest(c *gosocketio.Channel,
 	requestData models.ChannelsRequest) {
-	secretKey, err := app.getClientSecretKey(c.Id(), requestData.User)
-	if common.IsError(err) {
+	secretKey, err := app.getClientSecretKey(c.Id())
+	if utils.IsError(err) {
 		return
 	}
 	pack := models.ChannelsPack{app.DB.GetChannels(requestData.User.Id)}
-	c.Emit("/get-channels", pack.EncryptWith(secretKey))
+	c.Emit("/get-channels", encrypt.Encrypt(secretKey, pack))
 }
 
 func (app *ServerApp) PrintSessions() {
 	jsonSessions, err := json.MarshalIndent(app.Sessions, "", "    ")
-	if common.IsError(err) {
+	if utils.IsError(err) {
 		log.Println(err)
 	}
 	fmt.Printf("Connected Users %d:\n", len(app.Sessions))
@@ -231,26 +238,26 @@ func (app *ServerApp) createSession(socketId string, user models.User) models.Se
 	return newSession
 }
 
-func (app *ServerApp) getClientSecretKey(socketId string, user models.User) (uuid.UUID, error) {
-	session := app.Sessions[socketId]
-	if session.User.Id == user.Id && session.User.Username == user.Username {
-		return session.SecretKey, nil
+func (app *ServerApp) getClientSecretKey(socketId string) (uuid.UUID, error) {
+	session, ok := app.Sessions[socketId]
+	if !ok { // session does not exist
+		return uuid.UUID{}, errors.New("Incorrect userId or username")
 	}
-	return uuid.UUID{}, errors.New("Incorrect userId or username")
+	return session.SecretKey, nil
 }
 
 func (app *ServerApp) removeSession(socketId string) {
 	delete(app.Sessions, socketId)
 }
 
-func (app *ServerApp) EmitToUser(userId int64, method string, data models.Encryptable) {
+func (app *ServerApp) EmitToUser(userId int64, method string, data interface{}) {
 	// emit if user is online. To all connected clients with this account.
 	// data will be encrypted.
 	for socketId, session := range app.Sessions {
 		if session.User.Id == userId {
 			channel, err := app.Server.GetChannel(socketId)
-			if !common.IsError(err) {
-				channel.Emit(method, data.EncryptWith(session.SecretKey))
+			if !utils.IsError(err) {
+				channel.Emit(method, encrypt.Encrypt(session.SecretKey, data))
 			} else {
 				log.Println(err)
 			}
@@ -258,13 +265,13 @@ func (app *ServerApp) EmitToUser(userId int64, method string, data models.Encryp
 	}
 }
 
-func (app *ServerApp) EmitToAll(method string, data models.Encryptable) {
+func (app *ServerApp) EmitToAll(method string, data interface{}) {
 	// emit to all online clients.
 	// data will be encrypted.
 	for socketId, session := range app.Sessions {
 		channel, err := app.Server.GetChannel(socketId)
-		if !common.IsError(err) {
-			channel.Emit(method, data.EncryptWith(session.SecretKey))
+		if !utils.IsError(err) {
+			channel.Emit(method, encrypt.Encrypt(session.SecretKey, data))
 		} else {
 			log.Println(err)
 		}
@@ -287,7 +294,7 @@ func main() {
 
 	defer serverApp.CloseDB()
 
-	host, port := common.GetHostDataFromSettingsFile()
+	host, port := utils.GetHostDataFromSettingsFile()
 
 	serverApp.Run(fmt.Sprintf("%s:%d", host, port))
 }

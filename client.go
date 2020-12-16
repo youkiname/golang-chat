@@ -18,9 +18,10 @@ import (
 	"github.com/graarh/golang-socketio/transport"
 	"github.com/satori/go.uuid"
 
-	"chat/common"
+	"chat/encrypt"
 	"chat/gui"
 	"chat/models"
+	"chat/utils"
 )
 
 const WIDTH int = 1280
@@ -38,7 +39,7 @@ type ChatApplication struct {
 	Client              *gosocketio.Client
 	Connected           bool
 	CurrentUser         models.User
-	CommonKey           uuid.UUID // common key for group channel
+	CommonKey           uuid.UUID
 	SecretKey           uuid.UUID // key for personal channels
 	LoggedIn            bool
 	CurrentChatId       int64
@@ -50,6 +51,7 @@ type ChatApplication struct {
 func (chatApp *ChatApplication) init() {
 	// Creates main window
 	chatApp.App = app.New()
+	chatApp.CommonKey = uuid.FromBytesOrNil([]byte(utils.COMMON_SECRET_KEY))
 	window := chatApp.App.NewWindow("Golang chat")
 	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
 
@@ -76,7 +78,7 @@ func (chatApp *ChatApplication) startReconnectionTrying() {
 			sleepDuration, _ := time.ParseDuration(fmt.Sprintf("%dm", i))
 			time.Sleep(sleepDuration)
 		}
-		host, port := common.GetHostDataFromSettingsFile()
+		host, port := utils.GetHostDataFromSettingsFile()
 		fmt.Printf("Try reconnect to: %s:%d\n", host, port)
 		if chatApp.connect(host, port, true) {
 			dialog.ShowInformation("Success!", "Connection restored!", chatApp.Window)
@@ -96,7 +98,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 		gosocketio.GetUrl(host, port, false),
 		transport.GetDefaultWebsocketTransport())
 
-	if common.IsError(err) {
+	if utils.IsError(err) {
 		if !isReconnect {
 			info := fmt.Sprintf("Can't connect to host \"%s:%d\"\n"+
 				"Next try after: 10 sec\n"+
@@ -111,7 +113,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
 		chatApp.showError("Disconnected!")
 	})
-	if common.IsError(err) {
+	if utils.IsError(err) {
 		chatApp.showError(err.Error())
 		return false
 	}
@@ -119,7 +121,7 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 	err = client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
 		log.Println("Connected")
 	})
-	if common.IsError(err) {
+	if utils.IsError(err) {
 		chatApp.showError(err.Error())
 		return false
 	}
@@ -150,12 +152,14 @@ func (chatApp *ChatApplication) initClientCallbacks() {
 }
 
 func (chatApp *ChatApplication) processSuccessfulLogin(h *gosocketio.Channel,
-	authData models.SuccessfulAuth) {
+	encryptedAuthData string) {
 	log.Println("LOGIN")
+	authData := models.SuccessfulAuth{}
+	encrypt.Decrypt(chatApp.CommonKey, encryptedAuthData, &authData)
 	chatApp.CurrentUser = authData.User
 	chatApp.SecretKey = authData.SecretKey
 	chatApp.LoggedIn = true
-	chatApp.CurrentChatId = common.GROUP_CHAT_ID
+	chatApp.CurrentChatId = utils.GROUP_CHAT_ID
 
 	chatApp.ProfileInfo.SetText("WELCOME, " + authData.User.Username)
 	chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + authData.User.Username))
@@ -180,7 +184,8 @@ func (chatApp *ChatApplication) processFailedAuth(h *gosocketio.Channel,
 func (chatApp *ChatApplication) processNewMessage(h *gosocketio.Channel,
 	encryptedMessage string) {
 	// adds new message to list after obtaing data from server
-	msg := models.DecryptSavedMessage(chatApp.SecretKey, encryptedMessage)
+	msg := models.SavedMessage{}
+	encrypt.Decrypt(chatApp.SecretKey, encryptedMessage, &msg)
 
 	if chatApp.canDisplayNewMessage(msg) {
 		chatApp.addMessageToList(msg)
@@ -189,7 +194,8 @@ func (chatApp *ChatApplication) processNewMessage(h *gosocketio.Channel,
 
 func (chatApp *ChatApplication) processMessagesReceiving(h *gosocketio.Channel,
 	encryptedPack string) {
-	messagesPack := models.DecryptSavedMessagePack(chatApp.SecretKey, encryptedPack)
+	messagesPack := models.SavedMessagesPack{}
+	encrypt.Decrypt(chatApp.SecretKey, encryptedPack, &messagesPack)
 	messages := messagesPack.Messages
 	fmt.Printf("Got Messages. count = %d\n", len(messages))
 	chatApp.clearMessagesList()
@@ -200,12 +206,13 @@ func (chatApp *ChatApplication) processMessagesReceiving(h *gosocketio.Channel,
 
 func (chatApp *ChatApplication) processChannelsReceiving(h *gosocketio.Channel,
 	encryptedPack string) {
-	channelsPack := models.DecryptChannelsPack(chatApp.SecretKey, encryptedPack)
+	channelsPack := models.ChannelsPack{}
+	encrypt.Decrypt(chatApp.SecretKey, encryptedPack, &channelsPack)
 	channels := channelsPack.Channels
 	fmt.Printf("Got channels. count = %d\n", len(channels))
 	chatApp.Channels = channels
 	chatApp.refreshChannelList()
-	if chatApp.CurrentChatId == common.GROUP_CHAT_ID {
+	if chatApp.CurrentChatId == utils.GROUP_CHAT_ID {
 		chatApp.ChannelsRadioGroup.SetSelected(GROUP_CHANNEL_TITLE)
 	}
 }
@@ -213,8 +220,8 @@ func (chatApp *ChatApplication) processChannelsReceiving(h *gosocketio.Channel,
 func (chatApp *ChatApplication) sendLoginData(username string, password string) {
 	// sends new login data to server
 	if chatApp.Connected {
-		chatApp.Client.Emit("/login",
-			models.AuthRequest{username, common.GetPasswordHash(password)})
+		authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
+		chatApp.Client.Emit("/login", encrypt.Encrypt(chatApp.CommonKey, authData))
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
@@ -223,8 +230,8 @@ func (chatApp *ChatApplication) sendLoginData(username string, password string) 
 func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
 	// sends new registration data to server
 	if chatApp.Connected {
-		chatApp.Client.Emit("/register",
-			models.AuthRequest{username, common.GetPasswordHash(password)})
+		authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
+		chatApp.Client.Emit("/register", encrypt.Encrypt(chatApp.CommonKey, authData))
 	} else {
 		chatApp.showError("You are not connected to the server.")
 	}
@@ -234,7 +241,8 @@ func (chatApp *ChatApplication) sendMessage(text string) {
 	// sends new message data to server
 	user := chatApp.CurrentUser
 	if chatApp.Connected && chatApp.LoggedIn {
-		chatApp.Client.Emit("/message", models.Message{user, chatApp.CurrentChatId, text})
+		msg := models.Message{user, chatApp.CurrentChatId, text}
+		chatApp.Client.Emit("/message", encrypt.Encrypt(chatApp.SecretKey, msg))
 	} else if !chatApp.LoggedIn {
 		chatApp.showError("You are not logged in.")
 	} else {
@@ -274,7 +282,7 @@ func (chatApp *ChatApplication) canDisplayNewMessage(msg models.SavedMessage) bo
 			isMessageFromMe && currentChatId == msg.ChatId ||
 			isMessageToMe && currentChatId == msg.User.Id
 	} else { // message to group chat
-		return chatApp.CurrentChatId == common.GROUP_CHAT_ID
+		return chatApp.CurrentChatId == utils.GROUP_CHAT_ID
 	}
 }
 
@@ -299,7 +307,7 @@ func (chatApp *ChatApplication) getChannelId(title string) int64 {
 	if title == NOTES_CHANNEL_TITLE {
 		return chatApp.CurrentUser.Id
 	}
-	return common.GROUP_CHAT_ID // MAIN CHANNEL
+	return utils.GROUP_CHAT_ID // MAIN CHANNEL
 }
 
 func (chatApp *ChatApplication) openChannel(chatId int64) {
@@ -483,7 +491,7 @@ func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
 func main() {
 	chatApp := ChatApplication{}
 	chatApp.init()
-	host, port := common.GetHostDataFromSettingsFile()
+	host, port := utils.GetHostDataFromSettingsFile()
 	go chatApp.connect(host, port, false)
 	chatApp.showWindow()
 }
