@@ -2,17 +2,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"log"
 	"time"
-
-	"fyne.io/fyne"
-	"fyne.io/fyne/app"
-	"fyne.io/fyne/dialog"
-	"fyne.io/fyne/layout"
-	"fyne.io/fyne/widget"
 
 	"github.com/graarh/golang-socketio"
 	"github.com/graarh/golang-socketio/transport"
@@ -31,42 +24,25 @@ const GROUP_CHANNEL_TITLE = "MAIN"
 const NOTES_CHANNEL_TITLE = "NOTES"
 
 type ChatApplication struct {
-	App                 fyne.App
-	Window              fyne.Window
-	LeftSideBar         *widget.Group
-	MessagesList        *gui.MessageList
-	MessageListScroller *widget.ScrollContainer
-	Client              *gosocketio.Client
-	Connected           bool
-	CurrentUser         models.User
-	CommonKey           uuid.UUID
-	SecretKey           uuid.UUID // key for personal channels
-	LoggedIn            bool
-	CurrentChatId       int64
-	ProfileInfo         *widget.Label
-	Channels            []models.Channel
-	ChannelsRadioGroup  *widget.RadioGroup
+	Client        *gosocketio.Client
+	Connected     bool
+	CurrentUser   models.User
+	CommonKey     uuid.UUID
+	SecretKey     uuid.UUID // key for personal channels
+	LoggedIn      bool
+	CurrentChatId int64
+	Channels      []models.Channel
+	Gui           *gui.ChatGui
 }
 
 func (chatApp *ChatApplication) init() {
 	// Creates main window
-	chatApp.App = app.New()
+	chatApp.Gui = gui.NewChatGui()
 	chatApp.CommonKey = uuid.FromBytesOrNil([]byte(utils.COMMON_SECRET_KEY))
-	window := chatApp.App.NewWindow("Golang chat")
-	window.Resize(fyne.NewSize(WIDTH, HEIGHT))
 
-	window.SetContent(buildMainWindow(chatApp))
-	window.SetMaster()
-
-	chatApp.Window = window
 	chatApp.CurrentChatId = 0 // main channel
 	chatApp.Connected = false
 	chatApp.LoggedIn = false
-}
-
-func (chatApp *ChatApplication) showWindow() {
-	// shows main window
-	chatApp.Window.ShowAndRun()
 }
 
 func (chatApp *ChatApplication) startReconnectionTrying() {
@@ -81,16 +57,16 @@ func (chatApp *ChatApplication) startReconnectionTrying() {
 		host, port := utils.GetHostDataFromSettingsFile()
 		fmt.Printf("Try reconnect to: %s:%d\n", host, port)
 		if chatApp.connect(host, port, true) {
-			dialog.ShowInformation("Success!", "Connection restored!", chatApp.Window)
+			chatApp.Gui.ShowInfo("Connection restored!")
 			return
 		} else {
 			fmt.Printf("Unsuccess reconnect to: %s:%d\nNext try after %d minutes\n",
 				host, port, i+1)
 		}
 	}
-	dialog.ShowInformation(":(", "We couldn't restore connection :(\n"+
-		"Please, try change host information in settings file "+
-		"and restart application.", chatApp.Window)
+	chatApp.Gui.ShowInfo("We couldn't restore connection :(\n" +
+		"Please, try change host information in settings file " +
+		"and restart application.")
 }
 
 func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool) bool {
@@ -104,42 +80,67 @@ func (chatApp *ChatApplication) connect(host string, port int, isReconnect bool)
 				"Next try after: 10 sec\n"+
 				"Description: %s\n", host, port, err.Error())
 
-			chatApp.showError(info)
+			chatApp.Gui.ShowError(info)
 			go chatApp.startReconnectionTrying()
 		}
-		return false
-	}
-
-	err = client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
-		chatApp.showError("Disconnected!")
-	})
-	if utils.IsError(err) {
-		chatApp.showError(err.Error())
-		return false
-	}
-
-	err = client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
-		log.Println("Connected")
-	})
-	if utils.IsError(err) {
-		chatApp.showError(err.Error())
 		return false
 	}
 
 	chatApp.Client = client
 
 	chatApp.Connected = true
-	chatApp.Window.SetOnClosed(func() {
-		chatApp.Client.Close()
-	})
+	chatApp.Gui.SetOnClose(chatApp.Client.Close)
 
+	chatApp.initGuiCallbacks()
 	chatApp.initClientCallbacks()
 	return true
+}
+
+func (chatApp *ChatApplication) initGuiCallbacks() {
+	chatApp.Gui.SetCallbacks(
+		chatApp.sendMessage,
+		func() {
+			chatApp.openChannel(utils.GROUP_CHAT_ID)
+		},
+		func() {
+			chatApp.openChannel(chatApp.CurrentUser.Id)
+		},
+		func(title string) {
+			channelId := chatApp.getChannelId(title)
+			chatApp.openChannel(channelId)
+		},
+		func(user models.User) {
+			if user.Id == chatApp.CurrentUser.Id { // NOTES CHANNEL
+				chatApp.Gui.SelectChannel(gui.NOTES_CHANNEL_TITLE)
+				return
+			}
+
+			if !chatApp.isChannelInList(user.Id) {
+				newChannel := models.Channel{user.Id, user.Username}
+				chatApp.Gui.AppendChannel(newChannel.Title)
+				chatApp.Channels = append(chatApp.Channels, newChannel)
+			}
+			chatApp.Gui.SelectChannel(user.Username)
+		},
+		chatApp.sendLoginData,
+		chatApp.sendRegisterData)
 }
 
 func (chatApp *ChatApplication) initClientCallbacks() {
 	// sets callbacks to socket.io client
 	client := chatApp.Client
+
+	client.On(gosocketio.OnDisconnection, func(h *gosocketio.Channel) {
+		chatApp.Gui.DisableLoginButtons()
+		chatApp.Gui.DisableSend()
+		chatApp.Gui.ShowError("Disconnected!")
+	})
+
+	client.On(gosocketio.OnConnection, func(h *gosocketio.Channel) {
+		log.Println("Connected")
+		chatApp.Gui.EnableLoginButtons()
+	})
+
 	client.On("/failed-login", chatApp.processFailedAuth)
 	client.On("/failed-registeration", chatApp.processFailedAuth)
 
@@ -161,24 +162,23 @@ func (chatApp *ChatApplication) processSuccessfulLogin(h *gosocketio.Channel,
 	chatApp.LoggedIn = true
 	chatApp.CurrentChatId = utils.GROUP_CHAT_ID
 
-	chatApp.ProfileInfo.SetText("WELCOME, " + authData.User.Username)
-	chatApp.LeftSideBar.Append(widget.NewLabel("Success Login: " + authData.User.Username))
+	chatApp.Gui.SetProfileInfo(authData.User.Username)
 
-	chatApp.clearMessagesList()
+	chatApp.Gui.ClearMessages()
 	chatApp.loadChannels()
 	chatApp.loadMessages(chatApp.CurrentChatId)
+	chatApp.Gui.EnableSend()
 }
 
 func (chatApp *ChatApplication) processFailedAuth(h *gosocketio.Channel,
 	errorData models.AuthError) {
 	log.Println(errorData.Description)
 	if errorData.Process == "login" {
-		chatApp.showLoginDialog(errorData.Description)
+		chatApp.Gui.ShowLoginDialog(errorData.Description)
 	} else {
-		chatApp.showRegisterDialog(errorData.Description)
+		chatApp.Gui.ShowRegisterDialog(errorData.Description)
 	}
 	chatApp.LoggedIn = false
-	chatApp.ProfileInfo.SetText("FAILED LOGIN")
 }
 
 func (chatApp *ChatApplication) processNewMessage(h *gosocketio.Channel,
@@ -188,7 +188,7 @@ func (chatApp *ChatApplication) processNewMessage(h *gosocketio.Channel,
 	encrypt.Decrypt(chatApp.SecretKey, encryptedMessage, &msg)
 
 	if chatApp.canDisplayNewMessage(msg) {
-		chatApp.addMessageToList(msg)
+		chatApp.Gui.AddMessage(msg)
 	}
 }
 
@@ -198,10 +198,7 @@ func (chatApp *ChatApplication) processMessagesReceiving(h *gosocketio.Channel,
 	encrypt.Decrypt(chatApp.SecretKey, encryptedPack, &messagesPack)
 	messages := messagesPack.Messages
 	fmt.Printf("Got Messages. count = %d\n", len(messages))
-	chatApp.clearMessagesList()
-	chatApp.MessagesList.SetMessages(messages)
-	chatApp.MessagesList.Refresh()
-	chatApp.MessageListScroller.ScrollToBottom()
+	chatApp.Gui.SetMessages(messages)
 }
 
 func (chatApp *ChatApplication) processChannelsReceiving(h *gosocketio.Channel,
@@ -211,30 +208,19 @@ func (chatApp *ChatApplication) processChannelsReceiving(h *gosocketio.Channel,
 	channels := channelsPack.Channels
 	fmt.Printf("Got channels. count = %d\n", len(channels))
 	chatApp.Channels = channels
-	chatApp.refreshChannelList()
-	if chatApp.CurrentChatId == utils.GROUP_CHAT_ID {
-		chatApp.ChannelsRadioGroup.SetSelected(GROUP_CHANNEL_TITLE)
-	}
+	chatApp.Gui.SetChannels(channels)
 }
 
 func (chatApp *ChatApplication) sendLoginData(username string, password string) {
 	// sends new login data to server
-	if chatApp.Connected {
-		authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
-		chatApp.Client.Emit("/login", encrypt.Encrypt(chatApp.CommonKey, authData))
-	} else {
-		chatApp.showError("You are not connected to the server.")
-	}
+	authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
+	chatApp.Client.Emit("/login", encrypt.Encrypt(chatApp.CommonKey, authData))
 }
 
 func (chatApp *ChatApplication) sendRegisterData(username string, password string) {
 	// sends new registration data to server
-	if chatApp.Connected {
-		authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
-		chatApp.Client.Emit("/register", encrypt.Encrypt(chatApp.CommonKey, authData))
-	} else {
-		chatApp.showError("You are not connected to the server.")
-	}
+	authData := models.AuthRequest{username, encrypt.GetPasswordHash(password)}
+	chatApp.Client.Emit("/register", encrypt.Encrypt(chatApp.CommonKey, authData))
 }
 
 func (chatApp *ChatApplication) sendMessage(text string) {
@@ -244,9 +230,9 @@ func (chatApp *ChatApplication) sendMessage(text string) {
 		msg := models.Message{user, chatApp.CurrentChatId, text}
 		chatApp.Client.Emit("/message", encrypt.Encrypt(chatApp.SecretKey, msg))
 	} else if !chatApp.LoggedIn {
-		chatApp.showError("You are not logged in.")
+		chatApp.Gui.ShowError("You are not logged in.")
 	} else {
-		chatApp.showError("You are not connected to the server.")
+		chatApp.Gui.ShowError("You are not connected to the server.")
 	}
 }
 
@@ -256,8 +242,8 @@ func (chatApp *ChatApplication) loadMessages(chatId int64) {
 		return
 	}
 	fmt.Printf("Load messages from chatId = %d\n", chatId)
-	client := chatApp.Client
-	client.Emit("/get-messages", models.MessagesRequest{chatId, chatApp.CurrentUser})
+	chatApp.Client.Emit("/get-messages",
+		models.MessagesRequest{chatId, chatApp.CurrentUser})
 }
 
 func (chatApp *ChatApplication) loadChannels() {
@@ -304,10 +290,7 @@ func (chatApp *ChatApplication) getChannelId(title string) int64 {
 			return channel.Id
 		}
 	}
-	if title == NOTES_CHANNEL_TITLE {
-		return chatApp.CurrentUser.Id
-	}
-	return utils.GROUP_CHAT_ID // MAIN CHANNEL
+	return -1
 }
 
 func (chatApp *ChatApplication) openChannel(chatId int64) {
@@ -319,179 +302,10 @@ func (chatApp *ChatApplication) openNotesChannel() {
 	chatApp.openChannel(chatApp.CurrentUser.Id)
 }
 
-func (chatApp *ChatApplication) addMessageToList(msg models.SavedMessage) {
-	chatApp.MessagesList.AddMessage(msg)
-	chatApp.MessagesList.Refresh()
-
-}
-
-func (chatApp *ChatApplication) clearMessagesList() {
-	chatApp.MessagesList.Clear()
-	chatApp.MessagesList.Refresh()
-}
-
-func (chatApp *ChatApplication) showError(description string) {
-	// shows child window with error info
-	log.Println(description)
-	dialog.ShowError(errors.New(description), chatApp.Window)
-}
-
-func (chatApp *ChatApplication) refreshChannelList() {
-	// refresh left sidebar with channels list
-	// --------------------------------
-	// Use this function only after replacing all channels.
-	// For example, after new person login.
-	// After appending (group.Append) this func will be called automatically.
-	var stringChannels []string
-	stringChannels = append(stringChannels, GROUP_CHANNEL_TITLE, NOTES_CHANNEL_TITLE)
-	for _, channel := range chatApp.Channels {
-		stringChannels = append(stringChannels, channel.Title)
-	}
-	chatApp.ChannelsRadioGroup.Options = stringChannels
-	chatApp.ChannelsRadioGroup.Refresh()
-}
-
-func (chatApp *ChatApplication) openChannelByUser(user models.User) {
-	// selects obtained username in channels radio group
-	// or creates new channel if this username was not be added before
-	channelsGroup := chatApp.ChannelsRadioGroup
-
-	if user.Id == chatApp.CurrentUser.Id { // NOTES CHANNEL
-		channelsGroup.SetSelected(NOTES_CHANNEL_TITLE)
-		return
-	}
-
-	if !chatApp.isChannelInList(user.Id) {
-		channelsGroup.Append(user.Username)
-		chatApp.Channels = append(chatApp.Channels, models.Channel{user.Id, user.Username})
-	}
-	channelsGroup.SetSelected(user.Username)
-}
-
-// -------- BUILD WINDOW----------
-
-func (chatApp *ChatApplication) showLoginDialog(title string) {
-	// creates and shows child window with login form
-	inputUsername := widget.NewEntry()
-	inputUsername.SetPlaceHolder("username")
-	inputPassword := widget.NewPasswordEntry()
-	inputPassword.SetPlaceHolder("password")
-
-	loginBox := widget.NewVBox(inputUsername, inputPassword)
-	loginBox.Resize(fyne.NewSize(400, 400))
-
-	dialog.ShowCustomConfirm(title, "Ok", "Cancel", loginBox,
-		func(result bool) {
-			if result {
-				chatApp.sendLoginData(inputUsername.Text, inputPassword.Text)
-			}
-		}, chatApp.Window)
-}
-
-func (chatApp *ChatApplication) showRegisterDialog(title string) {
-	// creates and shows child window with registration form
-	inputUsername := widget.NewEntry()
-	inputUsername.SetPlaceHolder("username")
-	inputPassword := widget.NewPasswordEntry()
-	inputPassword.SetPlaceHolder("password")
-
-	loginBox := widget.NewVBox(inputUsername, inputPassword)
-	loginBox.Resize(fyne.NewSize(400, 400))
-
-	dialog.ShowCustomConfirm(title, "Ok", "Cancel", loginBox,
-		func(result bool) {
-			if result {
-				chatApp.sendRegisterData(inputUsername.Text, inputPassword.Text)
-			}
-		}, chatApp.Window)
-}
-
-func buildLeftSidebar(chatApp *ChatApplication) *widget.Group {
-	// creates login and register page
-	// sets login and register buttons callbacks
-	login := widget.NewButton("Login", func() {
-		if chatApp.Connected {
-			chatApp.showLoginDialog("Login")
-		} else {
-			chatApp.showError("You are not connected to the server.")
-		}
-	})
-	register := widget.NewButton("Register", func() {
-		if chatApp.Connected {
-			chatApp.showRegisterDialog("Registration")
-		} else {
-			chatApp.showError("You are not connected to the server.")
-		}
-	})
-
-	// info about previous users logged in
-	info := widget.NewLabel("")
-	chatApp.ProfileInfo = info
-
-	group := widget.NewGroup("Profile", login, register, info)
-	group.Resize(fyne.NewSize(400, HEIGHT))
-	return group
-}
-
-func buildCenter(chatApp *ChatApplication) *fyne.Container {
-	// creates messenger page: messages list and text input
-	messagesList := gui.NewMessageList(func(user models.User) {
-		chatApp.openChannelByUser(user)
-	})
-	chatApp.MessagesList = messagesList
-	scroller := widget.NewScrollContainer(messagesList.GetContainer())
-	scroller.SetMinSize(fyne.NewSize(500, 500))
-	chatApp.MessageListScroller = scroller
-
-	input := widget.NewEntry()
-	input.SetPlaceHolder("Your message")
-
-	send := widget.NewButton("Send", func() {
-		if input.Text != "" {
-			chatApp.sendMessage(input.Text)
-			input.SetText("")
-		}
-	})
-
-	top := widget.NewGroup("Messenger", scroller)
-	bottom := widget.NewHBox(input, send)
-
-	layout := layout.NewBorderLayout(top, bottom, nil, nil)
-
-	return fyne.NewContainerWithLayout(layout, top, bottom)
-}
-
-func buildRightSidebar(chatApp *ChatApplication) fyne.Widget {
-	// creates radio group with channel selecting callback
-	var stringChannels []string
-	radioGroup := widget.NewRadioGroup(stringChannels, func(changed string) {
-		fmt.Printf("Select channel = %s\n", changed)
-		selectedChatId := chatApp.getChannelId(changed)
-		chatApp.openChannel(selectedChatId)
-	})
-	radioGroup.Required = true
-	chatApp.ChannelsRadioGroup = radioGroup
-	return widget.NewGroup("Channels", radioGroup)
-}
-
-func buildMainWindow(chatApp *ChatApplication) *fyne.Container {
-	// returns container with messenger page and sidebars
-	leftSideBar := buildLeftSidebar(chatApp)
-	chatApp.LeftSideBar = leftSideBar
-
-	center := buildCenter(chatApp)
-
-	rightSideBar := buildRightSidebar(chatApp)
-	return fyne.NewContainerWithLayout(
-		layout.NewBorderLayout(nil, nil, leftSideBar, rightSideBar),
-		leftSideBar,
-		center, rightSideBar)
-}
-
 func main() {
 	chatApp := ChatApplication{}
 	chatApp.init()
 	host, port := utils.GetHostDataFromSettingsFile()
 	go chatApp.connect(host, port, false)
-	chatApp.showWindow()
+	chatApp.Gui.ShowWindow()
 }

@@ -16,7 +16,7 @@ var separatorColor = color.RGBA{33, 150, 243, 255}
 var msgBodyColor = color.RGBA{125, 119, 119, 255}
 var msgStrokeColor = color.RGBA{80, 80, 80, 255}
 
-const MAX_MSG_TEXT_LINE_LENGTH int = 70
+const MAX_MSG_TEXT_LINE_LENGTH int = 71
 
 type tappableLabel struct {
 	widget.Label
@@ -38,6 +38,35 @@ func (t *tappableLabel) Tapped(_ *fyne.PointEvent) {
 }
 
 func (t *tappableLabel) TappedSecondary(_ *fyne.PointEvent) {
+}
+
+type EnterEntry struct {
+	widget.Entry
+	onEnter func()
+}
+
+func NewEnterEntry() *EnterEntry {
+	entry := &EnterEntry{}
+	entry.ExtendBaseWidget(entry)
+
+	return entry
+}
+
+func (e *EnterEntry) Clear() {
+	e.Entry.SetText("")
+}
+
+func (e *EnterEntry) SetOnEnter(onEnter func()) {
+	e.onEnter = onEnter
+}
+
+func (e *EnterEntry) TypedKey(key *fyne.KeyEvent) {
+	switch key.Name {
+	case fyne.KeyReturn:
+		e.onEnter()
+	default:
+		e.Entry.TypedKey(key)
+	}
 }
 
 func splitTextToLines(text string, maxLength int) []string {

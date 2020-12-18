@@ -115,7 +115,6 @@ func (app *ServerApp) processSuccessfulLogin(c *gosocketio.Channel, user models.
 	newSession := app.createSession(c.Id(), user)
 
 	app.DB.ClearFailedLogin(user.Id)
-	app.PrintSessions()
 	c.Join("main")
 	authData := models.SuccessfulAuth{User: user, SecretKey: newSession.SecretKey}
 	c.Emit("/login", encrypt.Encrypt(app.CommonKey, authData))
@@ -279,7 +278,10 @@ func (app *ServerApp) EmitToAll(method string, data interface{}) {
 }
 
 func isValid(username string) bool {
-	// username must not have spaces
+	// username must not have spaces and be less than 20
+	if len(username) > 20 {
+		return false
+	}
 	for _, c := range username {
 		if c == ' ' {
 			return false
