@@ -17,12 +17,6 @@ import (
 	"chat/utils"
 )
 
-const WIDTH int = 1280
-const HEIGHT int = 720
-
-const GROUP_CHANNEL_TITLE = "MAIN"
-const NOTES_CHANNEL_TITLE = "NOTES"
-
 type ChatApplication struct {
 	Client        *gosocketio.Client
 	Connected     bool
